@@ -16,33 +16,35 @@ class ReceiptError(Exception):
     pass
 
 
-def save_receipt(data: bytes) -> tuple[str, str, str]:
-    """検証して保存し (相対パス, mime, sha256) を返す。
+def normalize(data: bytes) -> tuple[bytes, str, str]:
+    """検証して (正規化後バイト列, mime, 拡張子) を返す。
 
     画像: 向きを補正し長辺2400pxのJPEGに正規化(スマホ写真の容量削減・EXIF位置情報の除去)
-    PDF : そのまま保存
+    PDF : そのまま
     """
     if not data:
         raise ReceiptError("ファイルが空です")
     if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
         raise ReceiptError(f"ファイルが大きすぎます(上限 {MAX_UPLOAD_MB}MB)")
-
     if data[:5] == b"%PDF-":
-        out, mime, ext = data, "application/pdf", "pdf"
-    else:
-        try:
-            img = Image.open(io.BytesIO(data))
-            img.load()
-        except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
-            raise ReceiptError("画像(JPEG/PNG)またはPDFを選択してください")
-        img = ImageOps.exif_transpose(img)
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-        img.thumbnail((MAX_PX, MAX_PX))
-        buf = io.BytesIO()
-        img.save(buf, "JPEG", quality=85, optimize=True)
-        out, mime, ext = buf.getvalue(), "image/jpeg", "jpg"
+        return data, "application/pdf", "pdf"
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
+        raise ReceiptError("画像(JPEG/PNG)またはPDFを選択してください")
+    img = ImageOps.exif_transpose(img)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    img.thumbnail((MAX_PX, MAX_PX))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=85, optimize=True)
+    return buf.getvalue(), "image/jpeg", "jpg"
 
+
+def save_receipt(data: bytes) -> tuple[str, str, str]:
+    """検証して保存し (相対パス, mime, sha256) を返す。"""
+    out, mime, ext = normalize(data)
     sub = Path(str(date.today().year)) / f"{date.today().month:02d}"
     (UPLOAD_DIR / sub).mkdir(parents=True, exist_ok=True)
     rel = sub / f"{uuid.uuid4().hex}.{ext}"

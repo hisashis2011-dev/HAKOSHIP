@@ -159,3 +159,52 @@ def test_csv_formula_injection_neutralized():
     create(emp, payee="=HYPERLINK(\"http://evil\")")
     body = acc.get("/accounting/export.csv?month=2026-11").content.decode("utf-8-sig")
     assert "'=HYPERLINK" in body
+
+
+# ---------------- OCR (Claude Vision) ----------------
+import httpx
+from app import ocr as ocr_mod
+
+
+def _mock_client(handler):
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def _api_reply(text):
+    return httpx.Response(200, json={"content": [{"type": "text", "text": text}]})
+
+
+def test_ocr_extract_parses_and_sanitizes(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    ocr_mod.breaker.__init__()
+    reply = '```json\n{"expense_date":"2026-11-03","amount":"1,200","payee":"カフェ","invoice_no":"T1234567890123","category":"会議費"}\n```'
+    # amount が文字列"1,200"はintにできず落ちる / 不正値は捨てる
+    r = ocr_mod.extract(jpeg(), "image/jpeg", _mock_client(lambda req: _api_reply(reply)))
+    assert r == {"expense_date": "2026-11-03", "payee": "カフェ", "invoice_no": "T1234567890123", "category": "会議費"}
+    r = ocr_mod.extract(jpeg(), "image/jpeg", _mock_client(lambda req: _api_reply(
+        '{"expense_date":"2999-01-01","amount":980,"payee":null,"invoice_no":"bad","category":"謎"}')))
+    assert r == {"amount": 980}
+
+
+def test_ocr_endpoint_fallback_and_breaker(monkeypatch):
+    emp = login("emp@x.jp")
+    t = csrf(emp, "/expenses/new")
+    files = {"receipt": ("r.jpg", jpeg(), "image/jpeg")}
+    # キー未設定: 手入力に戻るだけ
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert emp.post("/expenses/ocr", data={"csrf_token": t}, files=files).json() == {"ok": False, "fields": {}}
+    # API障害: 失敗を返しサーバーは落ちない。3連続でAI呼び出しを一時停止
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    ocr_mod.breaker.__init__()
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise httpx.ConnectError("down")
+    monkeypatch.setattr(ocr_mod.httpx, "post", boom)
+    for _ in range(5):
+        assert emp.post("/expenses/ocr", data={"csrf_token": t}, files=files).json()["ok"] is False
+    assert len(calls) == 3
+    # OCRが失敗していても、手入力で申請は通る
+    assert create(emp).status_code == 303
+    ocr_mod.breaker.__init__()

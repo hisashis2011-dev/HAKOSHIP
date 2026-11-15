@@ -20,6 +20,12 @@ pytest                           # テスト
 ```
 ユーザーは管理画面からCSV(`email,name,role,approver_email`)で一括登録できます。
 
+## AI自動読み取り(Claude Vision)
+領収書を選ぶと日付・金額・支払先・インボイス番号・勘定科目を自動入力します(**入力欄の初期値の提案のみ**。申請者が確認・修正し、入力済みの欄は上書きしません)。
+- 有効化: 環境変数 `ANTHROPIC_API_KEY` を設定(未設定なら機能オフで従来の手入力)。モデルは `OCR_MODEL`(既定 `claude-haiku-5-5`)
+- **AIが停止・遅延・エラーでも申請業務は止まりません**: 失敗時は「手入力してください」と表示するだけ。3回連続失敗で60秒AI呼び出しを停止し、画面が待たされないようにしています
+- 注意: 領収書画像が Anthropic API に送信されます。社内のセキュリティ方針で許可されているか確認してください
+
 ## 設定(環境変数)
 `DATA_DIR`(DB・領収書の保存先, 既定 `./data`), `DATABASE_URL`(PostgreSQL等に変更可), `SECRET_KEY`, `COOKIE_SECURE=1`(HTTPS時は必須), `MAX_UPLOAD_MB`, `MAX_AMOUNT`。勘定科目は `app/config.py` の `CATEGORIES`。
 

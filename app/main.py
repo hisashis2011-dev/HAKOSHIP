@@ -13,7 +13,7 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.orm import Session, joinedload
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import workflow, receipts
+from . import workflow, receipts, ocr
 from .config import (BASE_DIR, SECRET_KEY, COOKIE_SECURE, SESSION_HOURS, CATEGORIES, MAX_AMOUNT)
 from .db import Base, engine, get_db
 from .models import (User, Property, Expense, ApprovalLog, ROLE_LABELS, STATUS_LABELS, ACTION_LABELS,
@@ -79,7 +79,7 @@ def admin_user(user: User = Depends(current_user)) -> User:
 def render(request: Request, name: str, user: User | None = None, status_code=200, **ctx):
     ctx.update(user=user, todo=getattr(request.state, 'todo', 0), csrf=csrf_token(request), flashes=request.session.pop("flash", []),
                STATUS_LABELS=STATUS_LABELS, ROLE_LABELS=ROLE_LABELS, ACTION_LABELS=ACTION_LABELS,
-               CATEGORIES=CATEGORIES)
+               CATEGORIES=CATEGORIES, ocr_enabled=ocr.enabled())
     return templates.TemplateResponse(request, name, ctx, status_code=status_code)
 
 
@@ -288,6 +288,18 @@ async def new_submit(request: Request, expense_date: str = Form(""), amount: str
     f = dict(expense_date=expense_date, amount=amount, payee=payee, category=category,
              purpose=purpose, property_code=property_code, invoice_no=invoice_no)
     return await _save_expense(request, db, user, None, f, receipt, action)
+
+
+@app.post("/expenses/ocr", dependencies=[Depends(verify_csrf)])
+async def ocr_receipt(request: Request, receipt: UploadFile = File(...), user: User = Depends(current_user)):
+    """領収書の自動読み取り。失敗しても ok:false を返すだけで、画面側は手入力を続けられる"""
+    from fastapi.concurrency import run_in_threadpool
+    try:
+        data, mime, _ = receipts.normalize(await receipt.read())
+        fields = await run_in_threadpool(ocr.extract, data, mime)
+    except (receipts.ReceiptError, ocr.OcrError):
+        return {"ok": False, "fields": {}}
+    return {"ok": bool(fields), "fields": fields}
 
 
 @app.get("/expenses/{eid}", response_class=HTMLResponse)

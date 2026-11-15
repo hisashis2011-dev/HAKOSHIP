@@ -19,6 +19,8 @@ PW = "correct-horse-battery"
 
 @pytest.fixture(autouse=True)
 def fresh_db():
+    from app.main import throttle
+    throttle.fails.clear()
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     with SessionLocal() as db:
