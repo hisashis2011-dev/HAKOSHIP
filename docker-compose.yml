@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    restart: always                 # 再起動・停電復旧後に自動で立ち上がる
+    ports:
+      - "8000:8000"                 # 社内LANのみ。ルーターで外部公開しないこと
+    volumes:
+      - ./data:/data                # DB と領収書画像(バックアップ対象)
+    env_file: .env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u;u.urlopen('http://localhost:8000/login')"]
+      interval: 30s
