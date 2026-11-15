@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card narrow">
+  <h1>ログイン</h1>
+  {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+  <form method="post" action="/login">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>メールアドレス<input type="email" name="email" required autocomplete="username" autofocus></label>
+    <label>パスワード<input type="password" name="password" required autocomplete="current-password"></label>
+    <button class="primary block">ログイン</button>
+  </form>
+</div>
+{% endblock %}

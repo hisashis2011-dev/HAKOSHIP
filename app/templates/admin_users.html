@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>ユーザー管理</h1>
+{% if new_pw %}
+<div class="flash warn"><strong>初期パスワード(この画面を閉じると再表示できません。本人に安全な方法で伝えてください)</strong>
+  <table>{% for em, pw in new_pw %}<tr><td>{{ em }}</td><td><code>{{ pw }}</code></td></tr>{% endfor %}</table></div>
+{% endif %}
+<div class="grid2">
+<form method="post" action="/admin/users" class="card">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <h2>追加</h2>
+  <label>メール<input type="email" name="email" required></label>
+  <label>氏名<input name="name" required></label>
+  <label>権限<select name="role">{% for k, v in ROLE_LABELS.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select></label>
+  <label>承認者のメール(上長)<input type="email" name="approver_email" placeholder="空欄＝経理へ直接申請"></label>
+  <button class="btn primary">追加</button>
+</form>
+<form method="post" action="/admin/users/import" enctype="multipart/form-data" class="card">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <h2>CSV一括登録</h2>
+  <p class="small muted">列: <code>email,name,role,approver_email</code>（role は employee / accounting / admin）</p>
+  <input type="file" name="file" accept=".csv" required>
+  <button class="btn primary">取り込む</button>
+</form>
+</div>
+<div class="tablewrap"><table>
+<tr><th>氏名</th><th>メール</th><th>権限</th><th>承認者(メール)</th><th>有効</th><th></th></tr>
+{% for u in users %}
+<tr class="{{ 'off' if not u.is_active }}">
+  <form method="post" action="/admin/users/{{ u.id }}"><input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <td><input name="name" value="{{ u.name }}"></td>
+  <td>{{ u.email }}</td>
+  <td><select name="role">{% for k, v in ROLE_LABELS.items() %}<option value="{{ k }}" {{ 'selected' if u.role == k }}>{{ v }}</option>{% endfor %}</select></td>
+  <td><input name="approver_email" value="{{ u.approver.email if u.approver else '' }}"></td>
+  <td><input type="checkbox" name="is_active" value="1" {{ 'checked' if u.is_active }}></td>
+  <td><button class="btn">保存</button></td></form>
+  <td><form method="post" action="/admin/users/{{ u.id }}/reset" onsubmit="return confirm('パスワードを再発行しますか？')"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="btn">PW再発行</button></form></td>
+</tr>
+{% endfor %}
+</table></div>
+{% endblock %}

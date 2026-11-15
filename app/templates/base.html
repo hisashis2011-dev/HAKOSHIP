@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}経費精算{% endblock %} | HAKOSHIP</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+{% if user %}
+<header class="top">
+  <a class="brand" href="/">HAKOSHIP 経費精算</a>
+  <nav>
+    <a href="/">マイ申請</a>
+    <a href="/approvals">承認待ち{% if todo is defined and todo %}<span class="badge">{{ todo }}</span>{% endif %}</a>
+    {% if user.is_accounting %}<a href="/accounting">経理</a>{% endif %}
+    {% if user.is_admin %}<a href="/admin/users">ユーザー</a><a href="/admin/properties">物件</a>{% endif %}
+  </nav>
+  <div class="who">{{ user.name }}
+    <a href="/password">PW変更</a>
+    <form method="post" action="/logout" class="inline"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="link">ログアウト</button></form>
+  </div>
+</header>
+{% endif %}
+<main>
+{% for kind, msg in flashes %}<div class="flash {{ kind }}">{{ msg }}</div>{% endfor %}
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

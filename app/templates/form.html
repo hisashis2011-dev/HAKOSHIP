@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}{{ '申請を編集' if e else '新規申請' }}{% endblock %}
+{% block content %}
+<h1>{{ '申請を編集' if e else '領収書を申請' }}</h1>
+{% if e and e.history and e.history[-1].action == 'return' %}
+<div class="flash warn"><strong>差戻し:</strong> {{ e.history[-1].comment }}（{{ e.history[-1].actor.name }}）</div>
+{% endif %}
+{% if errors %}<div class="flash err"><ul>{% for m in errors %}<li>{{ m }}</li>{% endfor %}</ul></div>{% endif %}
+<form method="post" enctype="multipart/form-data" class="card" id="expense-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+
+  <fieldset>
+    <legend>① 領収書</legend>
+    {% if e and e.receipt_path %}<p class="small muted">登録済み(差し替える場合のみ再選択)：<a href="/expenses/{{ e.id }}/receipt" target="_blank">表示</a></p>{% endif %}
+    <div class="row">
+      <label class="btn">📷 カメラで撮影<input type="file" id="cam" accept="image/*" capture="environment" hidden></label>
+      <label class="btn">🖼 写真・PDFを選択<input type="file" id="pick" accept="image/*,application/pdf" hidden></label>
+    </div>
+    <input type="file" name="receipt" id="receipt" accept="image/*,application/pdf" hidden>
+    <div id="preview" class="preview"></div>
+    <p class="small muted">スキャナで取り込んだPDF/画像もそのまま選択できます。文字が読める明るさで、レシート全体が写るように撮影してください。</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>② 内容</legend>
+    <label>利用日<input type="date" name="expense_date" value="{{ f.expense_date }}" required></label>
+    <label>金額(円・税込)<input type="text" inputmode="numeric" name="amount" value="{{ f.amount }}" placeholder="例 3980" required></label>
+    <label>支払先(店名)<input type="text" name="payee" value="{{ f.payee }}" maxlength="200" required></label>
+    <label>勘定科目
+      <select name="category" required>
+        <option value="">選択してください</option>
+        {% for c in CATEGORIES %}<option {{ 'selected' if f.category == c }}>{{ c }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>物件コード
+      <input type="text" name="property_code" value="{{ f.property_code }}" list="props" autocomplete="off" required placeholder="コードまたは物件名で検索">
+      <datalist id="props">{% for p in properties %}<option value="{{ p.code }}">{{ p.name }}</option>{% endfor %}</datalist>
+    </label>
+    <label>使用目的<textarea name="purpose" rows="3" maxlength="500" required placeholder="例：A邸 現地調査のための駐車場代">{{ f.purpose }}</textarea></label>
+    <label>インボイス登録番号(任意)<input type="text" name="invoice_no" value="{{ f.invoice_no }}" placeholder="T1234567890123" maxlength="14"></label>
+  </fieldset>
+
+  <div class="row">
+    <button class="btn" name="action" value="save">下書き保存</button>
+    <button class="btn primary" name="action" value="submit">申請する</button>
+  </div>
+</form>
+<script src="/static/form.js"></script>
+{% endblock %}

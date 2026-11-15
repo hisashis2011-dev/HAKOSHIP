@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row between">
+  <h1>マイ申請</h1>
+  <a class="btn primary" href="/expenses/new">＋ 領収書を申請</a>
+</div>
+<div class="chips">
+  <a class="{{ '' if status else 'on' }}" href="/">すべて</a>
+  {% for k, v in STATUS_LABELS.items() %}<a class="{{ 'on' if status == k }}" href="/?status={{ k }}">{{ v }}</a>{% endfor %}
+</div>
+{% if not items %}<p class="muted">申請はありません。</p>{% endif %}
+<ul class="cards">
+{% for e in items %}
+  <li><a href="/expenses/{{ e.id }}">
+    <div class="row between"><strong>{{ e.payee }}</strong><span class="amt">¥{{ '{:,}'.format(e.amount) }}</span></div>
+    <div class="row between small muted"><span>{{ e.expense_date }} ・ {{ e.property_code }} ・ {{ e.category }}</span>{% include "_status.html" %}</div>
+    <div class="small">{{ e.purpose|truncate(60) }}</div>
+  </a></li>
+{% endfor %}
+</ul>
+{% endblock %}
