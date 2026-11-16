@@ -4,6 +4,7 @@
 呼び出し側は手入力にフォールバックする(申請業務は止まらない)。
 """
 import base64
+import logging
 import json
 import os
 import re
@@ -12,6 +13,7 @@ from datetime import date
 
 import httpx
 
+log = logging.getLogger("uvicorn.error")
 API_URL = "https://api.anthropic.com/v1/messages"
 MODEL = os.getenv("OCR_MODEL", "claude-haiku-5-5")
 TIMEOUT = float(os.getenv("OCR_TIMEOUT", "25"))
@@ -95,8 +97,20 @@ def extract(data: bytes, mime: str, client: httpx.Client | None = None) -> dict:
         text = "".join(b.get("text", "") for b in r.json()["content"] if b.get("type") == "text")
         m = re.search(r"\{.*\}", text, re.S)
         result = _clean(json.loads(m.group(0))) if m else {}
-    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+    except httpx.HTTPStatusError as ex:
         breaker.fail()
+        detail = ""
+        try:
+            detail = ex.response.json().get("error", {}).get("message", "")
+        except ValueError:
+            pass
+        hint = {401: "APIキーが無効です", 403: "このキーでは利用できません", 404: "モデルが見つかりません(OCR_MODEL)",
+                429: "利用上限/レート制限", 400: "リクエスト不正またはクレジット残高不足の可能性"}.get(ex.response.status_code, "")
+        log.warning("OCR失敗 HTTP %s %s %s", ex.response.status_code, hint, detail)
+        raise OcrError("failed")
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as ex:
+        breaker.fail()
+        log.warning("OCR失敗(通信/解析エラー): %s %s", type(ex).__name__, ex)
         raise OcrError("failed")
     breaker.ok()
     return result

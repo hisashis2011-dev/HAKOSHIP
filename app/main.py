@@ -317,13 +317,17 @@ async def report_receipts(rid: int, request: Request, receipts_files: list[Uploa
 
     sem = asyncio.Semaphore(4)
 
+    ai_failed = 0
+
     async def read_ai(out, mime):
+        nonlocal ai_failed
         if not ocr.enabled():
             return {}
         async with sem:
             try:
                 return await run_in_threadpool(ocr.extract, out, mime)
             except ocr.OcrError:
+                ai_failed += 1
                 return {}
 
     results = await asyncio.gather(*[read_ai(o, m) for o, m, _, _ in prepared])
@@ -340,8 +344,15 @@ async def report_receipts(rid: int, request: Request, receipts_files: list[Uploa
         filled += bool(fields)
     db.commit()
     if prepared:
-        flash(request, f"{len(prepared)}枚を取り込みました" + (f"(うち{filled}枚はAIが自動入力。必ず内容を確認してください)"
-              if filled else "。各行の内容を入力してください"))
+        if filled:
+            tail = f"(うち{filled}枚はAIが自動入力。必ず内容を確認してください)"
+        elif not ocr.enabled():
+            tail = "。AI自動読み取りは無効です(APIキー未設定)。各行を手入力してください"
+        elif ai_failed:
+            tail = "。AIの読み取りに失敗しました(サーバー画面のログに理由が出ています)。手入力してください"
+        else:
+            tail = "。AIは項目を読み取れませんでした。手入力してください"
+        flash(request, f"{len(prepared)}枚を取り込みました{tail}", "ok" if filled or not ocr.enabled() else "warn")
     for m in msgs:
         flash(request, m, "warn")
     return go(f"/reports/{rid}/edit")
