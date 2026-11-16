@@ -2,26 +2,27 @@
 {% block content %}
 <h1>経理</h1>
 <form method="get" class="filters">
-  <label>対象月<input type="month" name="month" value="{{ month }}"></label>
+  <label>申請月<input type="month" name="month" value="{{ month }}"></label>
   <label>状況<select name="status"><option value="">すべて</option>
     {% for k, v in STATUS_LABELS.items() if k != 'draft' %}<option value="{{ k }}" {{ 'selected' if status == k }}>{{ v }}</option>{% endfor %}</select></label>
-  <label>物件コード<input name="prop" value="{{ prop }}" list="props"><datalist id="props">{% for p in properties %}<option value="{{ p.code }}">{{ p.name }}</option>{% endfor %}</datalist></label>
-  <label>検索(支払先・目的・申請者)<input name="q" value="{{ q }}"></label>
+  <label>工事コード<input name="proj" value="{{ proj }}" list="projs"><datalist id="projs">{% for p in projects %}<option value="{{ p.code }}">{{ p.name }}</option>{% endfor %}</datalist></label>
+  <label>検索(支払先・内容・申請者)<input name="q" value="{{ q }}"></label>
   <button class="btn">絞り込み</button>
-  <a class="btn" href="/accounting/export.csv?month={{ month }}&status={{ status }}&prop={{ prop }}&q={{ q|urlencode }}">CSV出力</a>
+  <a class="btn" href="/accounting/export.csv?month={{ month }}&status={{ status }}&proj={{ proj }}&q={{ q|urlencode }}">明細CSV出力</a>
 </form>
 <form method="post" action="/accounting/pay">
   <input type="hidden" name="csrf_token" value="{{ csrf }}">
-  <p>{{ items|length }}件 / 合計 <strong>¥{{ '{:,}'.format(total) }}</strong>
-     <button class="btn" onclick="return confirm('チェックした承認済の申請を精算済にします')">チェックした申請を精算済にする</button></p>
+  <p>{{ items|length }}件 / 合計① <strong>¥{{ '{:,}'.format(total) }}</strong>
+     <button class="btn" onclick="return confirm('チェックした承認済の精算書を精算済にします')">チェックした精算書を精算済にする</button></p>
   <div class="tablewrap"><table>
-    <tr><th></th><th>ID</th><th>利用日</th><th>申請者</th><th>支払先</th><th class="r">金額</th><th>科目</th><th>物件</th><th>目的</th><th>状況</th></tr>
-    {% for e in items %}
+    <tr><th></th><th>ID</th><th>申請日</th><th>申請者</th><th>所属</th><th>件数</th><th class="r">合計①</th><th class="r">仮払②</th><th class="r">過不足③</th><th>状況</th></tr>
+    {% for r in items %}
     <tr>
-      <td>{% if e.status == 'approved' %}<input type="checkbox" name="ids" value="{{ e.id }}">{% endif %}</td>
-      <td><a href="/expenses/{{ e.id }}">#{{ e.id }}</a></td><td>{{ e.expense_date }}</td><td>{{ e.user.name }}</td>
-      <td>{{ e.payee }}</td><td class="r">{{ '{:,}'.format(e.amount) }}</td><td>{{ e.category }}</td>
-      <td>{{ e.property_code }}</td><td>{{ e.purpose|truncate(30) }}</td><td>{% include "_status.html" %}</td>
+      <td>{% if r.status == 'approved' %}<input type="checkbox" name="ids" value="{{ r.id }}">{% endif %}</td>
+      <td><a href="/reports/{{ r.id }}">#{{ r.id }}</a></td><td>{{ r.submitted_at.strftime('%Y-%m-%d') }}</td><td>{{ r.user.name }}</td>
+      <td>{{ r.department.name if r.department }}</td><td>{{ r.lines|length }}</td>
+      <td class="r">{{ '{:,}'.format(r.total) }}</td><td class="r">{{ '{:,}'.format(r.advance_amount) }}</td><td class="r">{{ '{:,}'.format(r.balance) }}</td>
+      <td>{% include "_status.html" %}</td>
     </tr>
     {% endfor %}
   </table></div>

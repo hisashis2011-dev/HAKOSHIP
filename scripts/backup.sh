@@ -15,7 +15,7 @@ src = sqlite3.connect(sys.argv[1]); dst = sqlite3.connect(sys.argv[2])
 src.backup(dst); dst.close(); src.close()
 PY
 [ -d "$DATA_DIR/receipts" ] && cp -a "$DATA_DIR/receipts" "$work/receipts"
-tar -czf "$BACKUP_DIR/hakoship-$stamp.tar.gz" -C "$work" .
-chmod 600 "$BACKUP_DIR/hakoship-$stamp.tar.gz"
-find "$BACKUP_DIR" -name 'hakoship-*.tar.gz' -mtime +"$KEEP_DAYS" -delete
-echo "backup ok: $BACKUP_DIR/hakoship-$stamp.tar.gz"
+tar -czf "$BACKUP_DIR/mbs-expense-$stamp.tar.gz" -C "$work" .
+chmod 600 "$BACKUP_DIR/mbs-expense-$stamp.tar.gz"
+find "$BACKUP_DIR" -name 'mbs-expense-*.tar.gz' -mtime +"$KEEP_DAYS" -delete
+echo "backup ok: $BACKUP_DIR/mbs-expense-$stamp.tar.gz"

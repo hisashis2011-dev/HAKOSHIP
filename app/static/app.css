@@ -42,3 +42,10 @@ dl{display:grid;grid-template-columns:8em 1fr;gap:6px 10px;margin:0}dt{color:var
 .tablewrap{overflow-x:auto}table{border-collapse:collapse;width:100%;background:var(--card);font-size:.9rem}
 th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}td input,td select{margin:0;padding:6px}tr.off{opacity:.5}
 [hidden]{display:none!important}
+.line{background:var(--card)}
+.linegrid{display:grid;gap:0 12px;grid-template-columns:1fr}
+@media(min-width:700px){.linegrid{grid-template-columns:1fr 1fr 1fr}.linegrid .wide{grid-column:1/-1}}
+.thumb{height:44px;border-radius:4px;vertical-align:middle}
+td.wrap{white-space:normal;min-width:12em}
+table.sum{width:auto;margin:12px 0 12px auto}table.sum th{text-align:right;background:none}
+.btn.small,button.small{padding:4px 10px;font-size:.85rem}

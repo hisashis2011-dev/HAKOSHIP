@@ -1,20 +1,19 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="row between">
-  <h1>マイ申請</h1>
-  <a class="btn primary" href="/expenses/new">＋ 領収書を申請</a>
+  <h1>マイ精算書</h1>
+  <form method="post" action="/reports/new" class="inline"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="btn primary">＋ 新しい精算書を作る</button></form>
 </div>
 <div class="chips">
   <a class="{{ '' if status else 'on' }}" href="/">すべて</a>
   {% for k, v in STATUS_LABELS.items() %}<a class="{{ 'on' if status == k }}" href="/?status={{ k }}">{{ v }}</a>{% endfor %}
 </div>
-{% if not items %}<p class="muted">申請はありません。</p>{% endif %}
+{% if not items %}<p class="muted">精算書はありません。「新しい精算書を作る」から、領収書をまとめて取り込めます。</p>{% endif %}
 <ul class="cards">
-{% for e in items %}
-  <li><a href="/expenses/{{ e.id }}">
-    <div class="row between"><strong>{{ e.payee }}</strong><span class="amt">¥{{ '{:,}'.format(e.amount) }}</span></div>
-    <div class="row between small muted"><span>{{ e.expense_date }} ・ {{ e.property_code }} ・ {{ e.category }}</span>{% include "_status.html" %}</div>
-    <div class="small">{{ e.purpose|truncate(60) }}</div>
+{% for r in items %}
+  <li><a href="{{ '/reports/%d/edit' % r.id if r.status == 'draft' else '/reports/%d' % r.id }}">
+    <div class="row between"><strong>精算書 #{{ r.id }}（{{ r.lines|length }}件）</strong><span class="amt">¥{{ '{:,}'.format(r.total) }}</span></div>
+    <div class="row between small muted"><span>{{ r.submitted_at.strftime('%Y-%m-%d') if r.submitted_at else '未申請(作成 ' ~ r.created_at.strftime('%Y-%m-%d') ~ ')' }}</span>{% include "_status.html" %}</div>
   </a></li>
 {% endfor %}
 </ul>

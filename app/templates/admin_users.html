@@ -12,24 +12,26 @@
   <label>メール<input type="email" name="email" required></label>
   <label>氏名<input name="name" required></label>
   <label>権限<select name="role">{% for k, v in ROLE_LABELS.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select></label>
+  <label>所属(部門)<select name="department_code"><option value="">未設定</option>{% for d in departments %}<option value="{{ d.code }}">{{ d.code }} {{ d.name }}</option>{% endfor %}</select></label>
   <label>承認者のメール(上長)<input type="email" name="approver_email" placeholder="空欄＝経理へ直接申請"></label>
   <button class="btn primary">追加</button>
 </form>
 <form method="post" action="/admin/users/import" enctype="multipart/form-data" class="card">
   <input type="hidden" name="csrf_token" value="{{ csrf }}">
   <h2>CSV一括登録</h2>
-  <p class="small muted">列: <code>email,name,role,approver_email</code>（role は employee / accounting / admin）</p>
+  <p class="small muted">列: <code>email,name,role,approver_email,department_code</code>（role は employee / accounting / admin）</p>
   <input type="file" name="file" accept=".csv" required>
   <button class="btn primary">取り込む</button>
 </form>
 </div>
 <div class="tablewrap"><table>
-<tr><th>氏名</th><th>メール</th><th>権限</th><th>承認者(メール)</th><th>有効</th><th></th></tr>
+<tr><th>氏名</th><th>メール</th><th>所属</th><th>権限</th><th>承認者(メール)</th><th>有効</th><th></th></tr>
 {% for u in users %}
 <tr class="{{ 'off' if not u.is_active }}">
   <form method="post" action="/admin/users/{{ u.id }}"><input type="hidden" name="csrf_token" value="{{ csrf }}">
   <td><input name="name" value="{{ u.name }}"></td>
   <td>{{ u.email }}</td>
+  <td><select name="department_code"><option value="">未設定</option>{% for d in departments %}<option value="{{ d.code }}" {{ 'selected' if u.department_code == d.code }}>{{ d.code }} {{ d.name }}</option>{% endfor %}</select></td>
   <td><select name="role">{% for k, v in ROLE_LABELS.items() %}<option value="{{ k }}" {{ 'selected' if u.role == k }}>{{ v }}</option>{% endfor %}</select></td>
   <td><input name="approver_email" value="{{ u.approver.email if u.approver else '' }}"></td>
   <td><input type="checkbox" name="is_active" value="1" {{ 'checked' if u.is_active }}></td>

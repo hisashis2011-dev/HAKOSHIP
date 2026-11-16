@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><title>立替/仮払経費精算書 #{{ r.id }}</title>
+<style>
+body{font:12px/1.4 "Hiragino Sans","Noto Sans JP",Meiryo,sans-serif;margin:16px;color:#000;background:#fff}
+h1{text-align:center;font-size:20px;margin:0 0 12px}
+.head{display:flex;justify-content:space-between;margin-bottom:8px}
+table{border-collapse:collapse;width:100%}th,td{border:1px solid #000;padding:3px 5px;height:22px}th{background:#eee}
+.r{text-align:right}.sum{width:300px;margin:10px 0 0 auto}.note{font-size:10px;margin-top:8px}
+button{margin-bottom:10px}@media print{button{display:none}}
+</style></head><body>
+<button onclick="print()">印刷する</button>
+<h1>立替/仮払経費精算書</h1>
+<div class="head"><div>株式会社エムビーエス<br>管理部 宛</div>
+ <div>申請日 {{ r.submitted_at.strftime('%Y年%m月%d日') if r.submitted_at else '(未申請)' }}<br>所属 {{ r.department.name if r.department else '' }}<br>氏名 {{ r.user.name }}</div></div>
+<table>
+<tr><th>部門</th><th>支払日</th><th>工事コード</th><th>支払先</th><th>支払金額</th><th>支払内容・支払目的</th></tr>
+{% for l in r.lines %}<tr><td>{{ l.department_code }}</td><td>{{ l.expense_date }}</td><td>{{ l.project_code }}</td><td>{{ l.payee }}</td><td class="r">{{ '{:,}'.format(l.amount or 0) }}</td><td>{{ l.purpose }}</td></tr>{% endfor %}
+{% for _ in range(blank_rows) %}<tr><td></td><td></td><td></td><td></td><td></td><td></td></tr>{% endfor %}
+<tr><th colspan="4" class="r">合計①</th><td class="r">{{ '{:,}'.format(r.total) }}</td><td></td></tr>
+</table>
+<table class="sum">
+<tr><th>仮払金②</th><td class="r">{{ '{:,}'.format(r.advance_amount) }}</td></tr>
+<tr><th>差引過不足額 ③=②-①</th><td class="r">{{ '{:,}'.format(r.balance) }}</td></tr></table>
+<p class="note">※領収書は別紙に貼付する(システム上は画像を保管)<br>
+※部門コード: {% for d in depts %}{{ d.name }}[{{ d.code }}] {% endfor %}</p>
+</body></html>

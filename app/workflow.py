@@ -9,7 +9,7 @@
 * 管理者は上長不在時の代理承認が可能(履歴に残る)。
 """
 from .models import (
-    User, Expense, ApprovalLog,
+    User, Report, ApprovalLog,
     DRAFT, PENDING_MANAGER, PENDING_ACCOUNTING, APPROVED, PAID,
     SUBMIT, APPROVE, RETURN, PAY, now,
 )
@@ -19,7 +19,7 @@ class WorkflowError(Exception):
     pass
 
 
-def can_view(user: User, e: Expense) -> bool:
+def can_view(user: User, e: Report) -> bool:
     return (
         e.user_id == user.id
         or user.is_accounting
@@ -27,11 +27,11 @@ def can_view(user: User, e: Expense) -> bool:
     )
 
 
-def can_edit(user: User, e: Expense) -> bool:
+def can_edit(user: User, e: Report) -> bool:
     return e.user_id == user.id and e.status == DRAFT
 
 
-def can_act(user: User, e: Expense) -> bool:
+def can_act(user: User, e: Report) -> bool:
     """承認/差戻しが可能か"""
     if e.user_id == user.id:
         return False
@@ -43,21 +43,21 @@ def can_act(user: User, e: Expense) -> bool:
 
 
 def _log(db, e, actor, action, comment=""):
-    db.add(ApprovalLog(expense_id=e.id, actor_id=actor.id, action=action,
+    db.add(ApprovalLog(report_id=e.id, actor_id=actor.id, action=action,
                        step=e.status, comment=comment.strip()))
 
 
-def submit(db, e: Expense, actor: User):
+def submit(db, e: Report, actor: User):
     if not can_edit(actor, e):
         raise WorkflowError("この申請は提出できません")
-    if not e.receipt_path:
-        raise WorkflowError("領収書画像が必要です")
+    if not e.lines:
+        raise WorkflowError("明細がありません。領収書を追加してください")
     _log(db, e, actor, SUBMIT)
     e.status = PENDING_MANAGER if e.user.approver_id else PENDING_ACCOUNTING
     e.submitted_at = now()
 
 
-def approve(db, e: Expense, actor: User, comment=""):
+def approve(db, e: Report, actor: User, comment=""):
     if not can_act(actor, e):
         raise WorkflowError("この申請を承認する権限がありません")
     _log(db, e, actor, APPROVE, comment)
@@ -68,7 +68,7 @@ def approve(db, e: Expense, actor: User, comment=""):
         e.approved_at = now()
 
 
-def send_back(db, e: Expense, actor: User, comment: str):
+def send_back(db, e: Report, actor: User, comment: str):
     if not can_act(actor, e):
         raise WorkflowError("この申請を差し戻す権限がありません")
     if not comment.strip():
@@ -78,7 +78,7 @@ def send_back(db, e: Expense, actor: User, comment: str):
     e.submitted_at = None
 
 
-def mark_paid(db, e: Expense, actor: User):
+def mark_paid(db, e: Report, actor: User):
     if not actor.is_accounting or e.status != APPROVED:
         raise WorkflowError("精算済にできません")
     _log(db, e, actor, PAY)

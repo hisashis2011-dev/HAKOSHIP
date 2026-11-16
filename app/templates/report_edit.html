@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}精算書 #{{ r.id }}{% endblock %}
+{% block content %}
+<div class="row between"><h1>立替/仮払経費精算書 #{{ r.id }}</h1>{% include "_status.html" %}</div>
+{% if r.history and r.history[-1].action == 'return' %}
+<div class="flash warn"><strong>差戻し:</strong> {{ r.history[-1].comment }}（{{ r.history[-1].actor.name }}）</div>
+{% endif %}
+{% if errors %}<div class="flash err"><ul>{% for m in errors %}<li>{{ m }}</li>{% endfor %}</ul></div>{% endif %}
+
+<div class="card">
+  <dl><dt>氏名</dt><dd>{{ r.user.name }}</dd><dt>所属</dt><dd>{{ r.department.name if r.department else '(未設定)' }}</dd></dl>
+</div>
+
+<form method="post" action="/reports/{{ r.id }}/receipts" enctype="multipart/form-data" class="card" id="upload-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <h2>① 領収書を取り込む</h2>
+  <div class="row">
+    <label class="btn primary">📷 撮影して追加<input type="file" name="files" id="cam" accept="image/*" capture="environment" hidden></label>
+    <label class="btn primary">🖼 まとめて選択（写真・PDF・スキャン）<input type="file" name="files" id="pick" accept="image/*,application/pdf" multiple hidden></label>
+  </div>
+  <p class="small muted">複数枚を一度に選べます(最大{{ MAX_FILES }}枚)。1枚が1行になります。{% if ocr_enabled %}日付・金額・支払先はAIが読み取って自動入力します(必ず確認してください)。{% endif %}</p>
+  <p id="busy" class="small" role="status" hidden>⏳ 取り込み中です。枚数が多いと少し時間がかかります…</p>
+</form>
+
+<form method="post" action="/reports/{{ r.id }}/save" id="edit-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <h2>② 明細（{{ r.lines|length }}件）</h2>
+  {% if not r.lines %}<p class="muted">領収書を取り込むか、下の「行を追加」で明細を作ってください。</p>{% endif %}
+  {% for l in r.lines %}{% set w = rows[l.id] %}
+  <fieldset class="line">
+    <legend>{{ loop.index }}行目</legend>
+    <div class="linegrid">
+      <label>部門コード
+        <select name="dept_{{ l.id }}"><option value="">選択</option>
+          {% for d in departments %}<option value="{{ d.code }}" {{ 'selected' if w.dept == d.code }}>{{ d.code }} {{ d.name }}</option>{% endfor %}</select></label>
+      <label>支払日<input type="date" name="date_{{ l.id }}" value="{{ w.date }}"></label>
+      <label>工事コード<input name="project_{{ l.id }}" value="{{ w.project }}" list="projects" autocomplete="off" placeholder="コード/工事名で検索"></label>
+      <label>支払先<input name="payee_{{ l.id }}" value="{{ w.payee }}" maxlength="200"></label>
+      <label>支払金額(円・税込)<input name="amount_{{ l.id }}" value="{{ w.amount }}" inputmode="numeric"></label>
+      <label>インボイス番号(任意)<input name="invoice_{{ l.id }}" value="{{ w.invoice }}" maxlength="14" placeholder="T1234567890123"></label>
+      <label class="wide">支払内容・支払目的<textarea name="purpose_{{ l.id }}" rows="2" maxlength="500">{{ w.purpose }}</textarea></label>
+    </div>
+    <div class="row between">
+      <span class="small">{% if l.receipt_path %}<a href="/lines/{{ l.id }}/receipt" target="_blank">🧾 領収書を見る</a>{% else %}<span class="muted">領収書なし(交通費など)</span>{% endif %}</span>
+      <button class="btn danger small" name="action" value="delete:{{ l.id }}" formnovalidate onclick="return confirm('この行を削除しますか？')">この行を削除</button>
+    </div>
+  </fieldset>
+  {% endfor %}
+  <datalist id="projects">{% for p in projects %}<option value="{{ p.code }}">{{ p.name }}</option>{% endfor %}</datalist>
+  <button class="btn" name="action" value="addrow" formnovalidate>＋ 行を追加(領収書なし)</button>
+
+  <h2>③ 仮払金</h2>
+  <div class="card">
+    <label>仮払金②(円・受け取っていなければ0)<input name="advance" value="{{ advance }}" inputmode="numeric"></label>
+    <label>備考<input name="note" value="{{ note }}" maxlength="500"></label>
+    <p class="small muted">合計①: <strong>¥{{ '{:,}'.format(r.total) }}</strong>（保存すると最新の金額で再計算されます）</p>
+  </div>
+  <div class="row">
+    <button class="btn" name="action" value="save">下書き保存</button>
+    <button class="btn primary" name="action" value="submit">申請する</button>
+  </div>
+</form>
+{% if not r.history %}
+<form method="post" action="/reports/{{ r.id }}/delete" onsubmit="return confirm('この精算書を削除しますか？')"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="btn danger small">この下書きを削除</button></form>
+{% endif %}
+<script src="/static/form.js"></script>
+{% endblock %}

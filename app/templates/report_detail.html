@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}精算書 #{{ r.id }}{% endblock %}
+{% block content %}
+<div class="row between"><h1>立替/仮払経費精算書 #{{ r.id }}</h1>{% include "_status.html" %}</div>
+<div class="card">
+  <dl>
+    <dt>申請日</dt><dd>{{ r.submitted_at.strftime('%Y年%m月%d日') if r.submitted_at else '未申請' }}</dd>
+    <dt>所属</dt><dd>{{ r.department.name if r.department else '' }}</dd>
+    <dt>氏名</dt><dd>{{ r.user.name }}</dd>
+    {% if r.note %}<dt>備考</dt><dd>{{ r.note }}</dd>{% endif %}
+  </dl>
+</div>
+<div class="tablewrap"><table>
+  <tr><th>#</th><th>部門</th><th>支払日</th><th>工事コード</th><th>支払先</th><th class="r">支払金額</th><th>支払内容・支払目的</th><th>領収書</th></tr>
+  {% for l in r.lines %}
+  <tr><td>{{ loop.index }}</td><td>{{ l.department_code }}</td><td>{{ l.expense_date }}</td>
+    <td>{{ l.project_code }} <span class="small muted">{{ l.project.name if l.project }}</span></td>
+    <td>{{ l.payee }}{% if l.invoice_no %}<br><span class="small muted">{{ l.invoice_no }}</span>{% endif %}</td>
+    <td class="r">{{ '{:,}'.format(l.amount or 0) }}</td>
+    <td class="wrap">{{ l.purpose }}</td>
+    <td>{% if l.receipt_path %}<a href="/lines/{{ l.id }}/receipt" target="_blank">
+        {% if l.receipt_mime == 'application/pdf' %}PDF{% else %}<img class="thumb" src="/lines/{{ l.id }}/receipt" alt="領収書">{% endif %}</a>{% else %}<span class="muted small">なし</span>{% endif %}</td></tr>
+  {% endfor %}
+</table></div>
+{% include "_balance.html" %}
+
+<div class="row">
+  {% if can_edit %}<a class="btn primary" href="/reports/{{ r.id }}/edit">編集して再申請</a>{% endif %}
+  <a class="btn" href="/reports/{{ r.id }}/print" target="_blank">印刷用表示</a>
+</div>
+
+{% if can_act %}
+<form method="post" action="/reports/{{ r.id }}/decide" class="card">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <label>コメント(差戻し時は必須)<textarea name="comment" rows="2"></textarea></label>
+  <div class="row">
+    <button class="btn danger" name="decision" value="return">差戻し</button>
+    <button class="btn primary" name="decision" value="approve">承認</button>
+  </div>
+</form>
+{% endif %}
+
+<h2>履歴</h2>
+<ul class="timeline">
+{% for h in r.history %}
+  <li><span class="muted small">{{ h.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+      <strong>{{ h.actor.name }}</strong> が <strong>{{ ACTION_LABELS[h.action] }}</strong>{% if h.comment %}：{{ h.comment }}{% endif %}</li>
+{% else %}<li class="muted">履歴はありません</li>{% endfor %}
+</ul>
+{% endblock %}

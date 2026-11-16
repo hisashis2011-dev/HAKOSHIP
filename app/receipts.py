@@ -42,14 +42,17 @@ def normalize(data: bytes) -> tuple[bytes, str, str]:
     return buf.getvalue(), "image/jpeg", "jpg"
 
 
-def save_receipt(data: bytes) -> tuple[str, str, str]:
-    """検証して保存し (相対パス, mime, sha256) を返す。"""
-    out, mime, ext = normalize(data)
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def store(out: bytes, ext: str) -> str:
+    """正規化済みバイト列を保存し相対パスを返す"""
     sub = Path(str(date.today().year)) / f"{date.today().month:02d}"
     (UPLOAD_DIR / sub).mkdir(parents=True, exist_ok=True)
     rel = sub / f"{uuid.uuid4().hex}.{ext}"
     (UPLOAD_DIR / rel).write_bytes(out)
-    return str(rel), mime, hashlib.sha256(out).hexdigest()
+    return str(rel)
 
 
 def delete_receipt(rel: str | None):

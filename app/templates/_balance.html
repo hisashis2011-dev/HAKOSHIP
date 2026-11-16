@@ -1,0 +1,6 @@
+<table class="sum">
+  <tr><th>合計①</th><td class="amt">¥{{ '{:,}'.format(r.total) }}</td></tr>
+  <tr><th>仮払金②</th><td class="amt">¥{{ '{:,}'.format(r.advance_amount) }}</td></tr>
+  <tr><th>差引過不足額 ③=②-①</th><td class="amt">{{ '{:,}'.format(r.balance) }}円
+    <span class="small muted">{% if r.balance < 0 %}(会社から社員へ支払){% elif r.balance > 0 %}(社員から会社へ返金){% else %}(過不足なし){% endif %}</span></td></tr>
+</table>

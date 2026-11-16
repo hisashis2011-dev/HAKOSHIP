@@ -1,171 +1,222 @@
 import csv
 import io
+import re
 
-from .conftest import login, csrf, jpeg, form
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from .conftest import login, csrf, jpeg, row
+from app import ocr as ocr_mod
+from app.main import app, throttle
 from app.db import SessionLocal
-from app.models import Expense
+from app.models import Report, ExpenseLine
 
 
-def create(c, color=(200, 10, 10), **over):
-    t = csrf(c, "/expenses/new")
-    r = c.post("/expenses/new", data={**form(**over), "csrf_token": t},
-               files={"receipt": ("r.jpg", jpeg(color), "image/jpeg")})
-    return r
-
-
-def decide(c, eid, decision, comment=""):
+def new_report(c) -> int:
     t = csrf(c, "/")
-    return c.post(f"/expenses/{eid}/decide", data={"decision": decision, "comment": comment, "csrf_token": t})
+    r = c.post("/reports/new", data={"csrf_token": t})
+    assert r.status_code == 303
+    return int(re.search(r"/reports/(\d+)/edit", r.headers["location"]).group(1))
 
 
-def test_full_flow_and_csv():
+def upload(c, rid, colors):
+    t = csrf(c, f"/reports/{rid}/edit")
+    files = [("files", (f"r{i}.jpg", jpeg(col), "image/jpeg")) for i, col in enumerate(colors)]
+    return c.post(f"/reports/{rid}/receipts", data={"csrf_token": t}, files=files)
+
+
+def line_ids(rid):
+    with SessionLocal() as db:
+        return [l.id for l in db.get(Report, rid).lines]
+
+
+def save(c, rid, rows: dict, action="save", advance="0", note=""):
+    t = csrf(c, f"/reports/{rid}/edit")
+    data = {"csrf_token": t, "action": action, "advance": advance, "note": note}
+    for lid, r in rows.items():
+        for k, v in r.items():
+            data[f"{k}_{lid}"] = v
+    return c.post(f"/reports/{rid}/save", data=data)
+
+
+def make_submitted(c, n=2, advance="0", base=0):
+    rid = new_report(c)
+    upload(c, rid, [(base + 10 * i, 50, 200) for i in range(n)])
+    ids = line_ids(rid)
+    r = save(c, rid, {i: row(amount=str(1000 * (k + 1))) for k, i in enumerate(ids)}, "submit", advance)
+    assert r.status_code == 303 and r.headers["location"] == f"/reports/{rid}", r.text[:500]
+    return rid
+
+
+def decide(c, rid, decision, comment=""):
+    t = csrf(c, "/")
+    return c.post(f"/reports/{rid}/decide", data={"decision": decision, "comment": comment, "csrf_token": t})
+
+
+def test_multi_receipt_upload_creates_lines_and_full_flow_csv():
     emp, mgr, acc = login("emp@x.jp"), login("mgr@x.jp"), login("acc@x.jp")
-    r = create(emp)
-    assert r.status_code == 303 and r.headers["location"] == "/expenses/1"
-    with SessionLocal() as db:
-        e = db.get(Expense, 1)
-        assert (e.status, e.amount, e.property_code) == ("pending_manager", 3980, "A-001")
-
-    assert "コインパーキング" in mgr.get("/approvals").text
-    assert "コインパーキング" not in acc.get("/approvals").text  # 経理は上長ステップでは出ない
-    assert decide(acc, 1, "approve").status_code == 303  # 権限なし→エラーflashで戻る
-    with SessionLocal() as db:
-        assert db.get(Expense, 1).status == "pending_manager"
-
-    decide(mgr, 1, "approve")
-    assert "コインパーキング" in acc.get("/approvals").text
-    decide(acc, 1, "approve")
-    with SessionLocal() as db:
-        assert db.get(Expense, 1).status == "approved"
-
-    t = csrf(acc, "/accounting")
-    acc.post("/accounting/pay", data={"ids": ["1"], "csrf_token": t})
-    with SessionLocal() as db:
-        e = db.get(Expense, 1)
-        assert e.status == "paid" and [h.action for h in e.history] == ["submit", "approve", "approve", "pay"]
-
-    body = acc.get("/accounting/export.csv?month=2026-11").content.decode("utf-8-sig")
-    rows = list(csv.reader(io.StringIO(body)))
-    assert rows[1][1:7] == ["2026-11-01", "Emp", "emp@x.jp", "コインパーキング", "3980", "旅費交通費"]
-    assert rows[1][7] == "A-001"
-
-
-def test_return_and_resubmit():
-    emp, mgr = login("emp@x.jp"), login("mgr@x.jp")
-    create(emp)
-    assert decide(mgr, 1, "return", "").status_code == 303  # 理由なしは不可
-    with SessionLocal() as db:
-        assert db.get(Expense, 1).status == "pending_manager"
-    decide(mgr, 1, "return", "領収書が不鮮明")
-    with SessionLocal() as db:
-        assert db.get(Expense, 1).status == "draft"
-    assert "領収書が不鮮明" in emp.get("/expenses/1/edit").text
-    t = csrf(emp, "/expenses/1/edit")
-    r = emp.post("/expenses/1/edit", data={**form(), "csrf_token": t})  # 画像は既存のまま
+    rid = new_report(emp)
+    r = upload(emp, rid, [(200, 10, 10), (10, 200, 10), (10, 10, 200)])  # 3枚まとめて
+    assert r.status_code == 303
+    assert len(line_ids(rid)) == 3
+    ids = line_ids(rid)
+    r = save(emp, rid, {ids[0]: row(amount="1,000"), ids[1]: row(amount="2000", payee="店B"),
+                        ids[2]: row(amount="3000", payee="店C")}, "submit", advance="2,000")
     assert r.status_code == 303
     with SessionLocal() as db:
-        assert db.get(Expense, 1).status == "pending_manager"
+        rep = db.get(Report, rid)
+        assert rep.status == "pending_manager"
+        assert (rep.total, rep.advance_amount, rep.balance) == (6000, 2000, -4000)
+
+    assert "精算書 #1" in mgr.get("/approvals").text and "精算書 #1" not in acc.get("/approvals").text
+    decide(acc, rid, "approve")  # 権限なし → 変化なし
+    with SessionLocal() as db:
+        assert db.get(Report, rid).status == "pending_manager"
+    decide(mgr, rid, "approve")
+    decide(acc, rid, "approve")
+    t = csrf(acc, "/accounting")
+    acc.post("/accounting/pay", data={"ids": [str(rid)], "csrf_token": t})
+    with SessionLocal() as db:
+        rep = db.get(Report, rid)
+        assert rep.status == "paid" and [h.action for h in rep.history] == ["submit", "approve", "approve", "pay"]
+
+    body = acc.get("/accounting/export.csv").content.decode("utf-8-sig")
+    rows = list(csv.reader(io.StringIO(body)))
+    assert len(rows) == 4  # ヘッダ + 3明細
+    h = rows[0]
+    first = dict(zip(h, rows[1]))
+    assert (first["申請者"], first["部門コード"], first["工事コード"], first["支払金額"]) == ("Emp", "7", "A-001", "1000")
+    assert (first["精算書合計①"], first["仮払金②"], first["差引過不足③"]) == ("6000", "2000", "-4000")
+    assert "印刷" in emp.get(f"/reports/{rid}/print").text or "立替/仮払経費精算書" in emp.get(f"/reports/{rid}/print").text
+
+
+def test_validation_blocks_submit_but_draft_saves():
+    emp = login("emp@x.jp")
+    rid = new_report(emp)
+    upload(emp, rid, [(1, 2, 3)])
+    (lid,) = line_ids(rid)
+    # 下書きは未入力でも保存可
+    assert save(emp, rid, {lid: row(amount="", payee="", purpose="", project="")}, "save").status_code == 303
+    for over, msg in [({"project": "NOPE"}, "工事コード"), ({"project": "OLD"}, "工事コード"), ({"amount": "0"}, "金額"),
+                      ({"amount": "abc"}, "金額"), ({"date": "2999-01-01"}, "未来"), ({"purpose": " "}, "支払内容"),
+                      ({"invoice": "123"}, "インボイス"), ({"dept": "OLD"}, "部門コード"), ({"dept": ""}, "部門コード"),
+                      ({"payee": ""}, "支払先")]:
+        r = save(emp, rid, {lid: row(**over)}, "submit")
+        assert r.status_code == 400 and msg in r.text, (over, r.status_code)
+    with SessionLocal() as db:
+        assert db.get(Report, rid).status == "draft"
+    # 明細ゼロでは申請不可
+    rid2 = new_report(emp)
+    assert save(emp, rid2, {}, "submit").status_code == 400
+
+
+def test_duplicate_and_bad_files_are_skipped():
+    emp, solo = login("emp@x.jp"), login("solo@x.jp")
+    rid = new_report(emp)
+    upload(emp, rid, [(9, 9, 9), (9, 9, 9)])  # 同一画像2枚 → 1行のみ
+    assert len(line_ids(rid)) == 1
+    rid2 = new_report(solo)
+    upload(solo, rid2, [(9, 9, 9)])  # 他人でも同じ領収書は不可
+    assert len(line_ids(rid2)) == 0
+    t = csrf(solo, f"/reports/{rid2}/edit")
+    solo.post(f"/reports/{rid2}/receipts", data={"csrf_token": t}, files=[("files", ("a.jpg", b"junk", "image/jpeg"))])
+    assert len(line_ids(rid2)) == 0
+
+
+def test_return_edit_resubmit_and_row_ops():
+    emp, mgr = login("emp@x.jp"), login("mgr@x.jp")
+    rid = make_submitted(emp, 1)
+    assert decide(mgr, rid, "return", "").status_code == 303
+    with SessionLocal() as db:
+        assert db.get(Report, rid).status == "pending_manager"  # 理由なし不可
+    decide(mgr, rid, "return", "領収書が不鮮明")
+    assert "領収書が不鮮明" in emp.get(f"/reports/{rid}/edit").text
+    (lid,) = line_ids(rid)
+    save(emp, rid, {lid: row()}, "addrow")  # 領収書なし行を追加
+    assert len(line_ids(rid)) == 2
+    new = line_ids(rid)[1]
+    save(emp, rid, {lid: row(), new: row()}, f"delete:{lid}")
+    assert line_ids(rid) == [new]
+    r = save(emp, rid, {new: row(amount="500", purpose="電車代")}, "submit")
+    assert r.status_code == 303
+    with SessionLocal() as db:
+        rep = db.get(Report, rid)
+        assert rep.status == "pending_manager" and rep.lines[0].no_receipt
 
 
 def test_no_approver_goes_to_accounting_and_no_self_approval():
     solo, acc = login("solo@x.jp"), login("acc@x.jp")
-    create(solo)
+    r1 = make_submitted(solo, 1, base=100)
     with SessionLocal() as db:
-        assert db.get(Expense, 1).status == "pending_accounting"
-    acc_exp = create(acc, color=(10, 200, 10))  # 経理自身の申請
-    assert acc_exp.status_code == 303
-    decide(acc, 2, "approve")
+        assert db.get(Report, r1).status == "pending_accounting"
+    r2 = make_submitted(acc, 1, base=150)  # 経理自身の精算書
+    decide(acc, r2, "approve")
     with SessionLocal() as db:
-        assert db.get(Expense, 2).status == "pending_accounting"  # 自己承認不可
-    decide(acc, 1, "approve")
+        assert db.get(Report, r2).status == "pending_accounting"  # 自己承認不可
+    decide(acc, r1, "approve")
     with SessionLocal() as db:
-        assert db.get(Expense, 1).status == "approved"
-
-
-def test_validation_errors():
-    emp = login("emp@x.jp")
-    for over, msg in [({"property_code": "NOPE"}, "物件コード"), ({"property_code": "OLD"}, "物件コード"),
-                      ({"amount": "0"}, "金額"), ({"amount": "abc"}, "金額"),
-                      ({"expense_date": "2999-01-01"}, "未来"), ({"purpose": " "}, "使用目的"),
-                      ({"invoice_no": "123"}, "インボイス"), ({"category": "x"}, "勘定科目")]:
-        r = create(emp, **over)
-        assert r.status_code == 400 and msg in r.text, (over, r.status_code)
-    t = csrf(emp, "/expenses/new")
-    r = emp.post("/expenses/new", data={**form(), "csrf_token": t})
-    assert r.status_code == 400 and "領収書" in r.text
-    r = emp.post("/expenses/new", data={**form(), "csrf_token": t}, files={"receipt": ("a.jpg", b"not an image")})
-    assert r.status_code == 400
-    with SessionLocal() as db:
-        assert db.query(Expense).count() == 0
-
-
-def test_duplicate_receipt_rejected():
-    emp, solo = login("emp@x.jp"), login("solo@x.jp")
-    assert create(emp).status_code == 303
-    r = create(solo)  # 同一画像
-    assert r.status_code == 400 and "同じ領収書" in r.text
+        assert db.get(Report, r1).status == "approved"
 
 
 def test_access_control():
     emp, other, mgr, acc = login("emp@x.jp"), login("other@x.jp"), login("mgr@x.jp"), login("acc@x.jp")
-    create(emp)
-    assert other.get("/expenses/1").status_code == 404
-    assert other.get("/expenses/1/receipt").status_code == 404
-    assert mgr.get("/expenses/1/receipt").status_code == 200
-    assert acc.get("/expenses/1").status_code == 200
-    assert other.get("/accounting").status_code == 403
-    assert emp.get("/admin/users").status_code == 403
-    assert decide(other, 1, "approve").status_code == 404
-    # 提出後は編集不可
-    assert emp.get("/expenses/1/edit").status_code == 403
+    rid = make_submitted(emp, 1)
+    (lid,) = line_ids(rid)
+    assert other.get(f"/reports/{rid}").status_code == 404
+    assert other.get(f"/lines/{lid}/receipt").status_code == 404
+    assert mgr.get(f"/lines/{lid}/receipt").status_code == 200
+    assert acc.get(f"/reports/{rid}").status_code == 200
+    assert other.get("/accounting").status_code == 403 and emp.get("/admin/users").status_code == 403
+    assert decide(other, rid, "approve").status_code == 404
+    assert emp.get(f"/reports/{rid}/edit").status_code == 403  # 提出後は編集不可
+    t = csrf(other, "/")
+    assert other.post(f"/reports/{rid}/receipts", data={"csrf_token": t},
+                      files=[("files", ("a.jpg", jpeg(), "image/jpeg"))]).status_code == 404
 
 
 def test_csrf_and_anonymous():
-    anon = login("emp@x.jp")
-    r = anon.post("/expenses/new", data=form())
-    assert r.status_code == 403
-    from fastapi.testclient import TestClient
-    from app.main import app
+    emp = login("emp@x.jp")
+    assert emp.post("/reports/new", data={}).status_code == 403
     c = TestClient(app, follow_redirects=False)
     assert c.get("/").headers["location"] == "/login"
-    assert c.get("/expenses/1/receipt").status_code == 303
+    assert c.get("/lines/1/receipt").status_code == 303
 
 
-def test_login_throttle_and_bad_password():
-    from fastapi.testclient import TestClient
-    from app.main import app
+def test_login_throttle():
     c = TestClient(app, follow_redirects=False)
     t = csrf(c, "/login")
-    codes = [c.post("/login", data={"email": "emp@x.jp", "password": "bad", "csrf_token": t}).status_code
-             for _ in range(6)]
+    codes = [c.post("/login", data={"email": "emp@x.jp", "password": "bad", "csrf_token": t}).status_code for _ in range(6)]
     assert codes[:5] == [401] * 5 and codes[5] == 429
 
 
-def test_admin_user_csv_import_and_property_master():
+def test_admin_import_users_departments_projects():
     adm = login("admin@x.jp")
+    t = csrf(adm, "/admin/master/departments")
+    adm.post("/admin/master/departments/import", data={"csrf_token": t},
+             files={"file": ("d.csv", "code,name\n11,大阪\n".encode(), "text/csv")})
+    assert "大阪" in adm.get("/admin/master/departments").text
+    t = csrf(adm, "/admin/master/projects")
+    adm.post("/admin/master/projects/import", data={"csrf_token": t},
+             files={"file": ("p.csv", "code,name\nb-9,新工事\n".encode(), "text/csv")})
+    assert "B-9" in adm.get("/admin/master/projects").text
     t = csrf(adm, "/admin/users")
-    csvdata = "email,name,role,approver_email\nn1@x.jp,新人,employee,mgr@x.jp\nn2@x.jp,課長,employee,\n"
-    r = adm.post("/admin/users/import", data={"csrf_token": t}, files={"file": ("u.csv", csvdata.encode(), "text/csv")})
-    assert r.status_code == 303
+    csvdata = "email,name,role,approver_email,department_code\nn1@x.jp,新人,employee,mgr@x.jp,11\n"
+    adm.post("/admin/users/import", data={"csrf_token": t}, files={"file": ("u.csv", csvdata.encode(), "text/csv")})
     page = adm.get("/admin/users").text
     assert "n1@x.jp" in page and "初期パスワード" in page
-    t = csrf(adm, "/admin/properties")
-    adm.post("/admin/properties/import", data={"csrf_token": t}, files={"file": ("p.csv", "code,name\nb-9,新物件\n".encode(), "text/csv")})
-    assert "B-9" in adm.get("/admin/properties").text
 
 
 def test_csv_formula_injection_neutralized():
     emp, acc = login("solo@x.jp"), login("acc@x.jp")
-    create(emp, payee="=HYPERLINK(\"http://evil\")")
-    body = acc.get("/accounting/export.csv?month=2026-11").content.decode("utf-8-sig")
-    assert "'=HYPERLINK" in body
+    rid = new_report(emp)
+    upload(emp, rid, [(77, 7, 7)])
+    (lid,) = line_ids(rid)
+    save(emp, rid, {lid: row(payee='=HYPERLINK("http://evil")')}, "submit")
+    assert "'=HYPERLINK" in acc.get("/accounting/export.csv").content.decode("utf-8-sig")
 
 
 # ---------------- OCR (Claude Vision) ----------------
-import httpx
-from app import ocr as ocr_mod
-
-
 def _mock_client(handler):
     return httpx.Client(transport=httpx.MockTransport(handler))
 
@@ -177,23 +228,34 @@ def _api_reply(text):
 def test_ocr_extract_parses_and_sanitizes(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     ocr_mod.breaker.__init__()
-    reply = '```json\n{"expense_date":"2026-11-03","amount":"1,200","payee":"カフェ","invoice_no":"T1234567890123","category":"会議費"}\n```'
-    # amount が文字列"1,200"はintにできず落ちる / 不正値は捨てる
-    r = ocr_mod.extract(jpeg(), "image/jpeg", _mock_client(lambda req: _api_reply(reply)))
-    assert r == {"expense_date": "2026-11-03", "payee": "カフェ", "invoice_no": "T1234567890123", "category": "会議費"}
+    reply = '```json\n{"expense_date":"2026-11-03","amount":1200,"payee":"カフェ","invoice_no":"T1234567890123"}\n```'
+    assert ocr_mod.extract(jpeg(), "image/jpeg", _mock_client(lambda req: _api_reply(reply))) == {
+        "expense_date": "2026-11-03", "amount": 1200, "payee": "カフェ", "invoice_no": "T1234567890123"}
     r = ocr_mod.extract(jpeg(), "image/jpeg", _mock_client(lambda req: _api_reply(
-        '{"expense_date":"2999-01-01","amount":980,"payee":null,"invoice_no":"bad","category":"謎"}')))
+        '{"expense_date":"2999-01-01","amount":980,"payee":null,"invoice_no":"bad"}')))
     assert r == {"amount": 980}
 
 
-def test_ocr_endpoint_fallback_and_breaker(monkeypatch):
+def test_upload_prefills_lines_from_ai_and_survives_ai_failure(monkeypatch):
     emp = login("emp@x.jp")
-    t = csrf(emp, "/expenses/new")
-    files = {"receipt": ("r.jpg", jpeg(), "image/jpeg")}
-    # キー未設定: 手入力に戻るだけ
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    assert emp.post("/expenses/ocr", data={"csrf_token": t}, files=files).json() == {"ok": False, "fields": {}}
-    # API障害: 失敗を返しサーバーは落ちない。3連続でAI呼び出しを一時停止
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    ocr_mod.breaker.__init__()
+    monkeypatch.setattr(ocr_mod, "extract", lambda data, mime, client=None: {
+        "expense_date": "2026-11-02", "amount": 777, "payee": "AI店"})
+    rid = new_report(emp)
+    upload(emp, rid, [(5, 5, 5), (6, 6, 6)])
+    with SessionLocal() as db:
+        ls = db.get(Report, rid).lines
+        assert [(l.amount, l.payee, str(l.expense_date)) for l in ls] == [(777, "AI店", "2026-11-02")] * 2
+
+    def boom(*a, **k):
+        raise ocr_mod.OcrError("down")
+    monkeypatch.setattr(ocr_mod, "extract", boom)
+    upload(emp, rid, [(8, 8, 8)])  # AI障害でも取り込みは成功し手入力へ
+    assert len(line_ids(rid)) == 3
+
+
+def test_ocr_breaker_suspends_after_failures(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     ocr_mod.breaker.__init__()
     calls = []
@@ -203,8 +265,7 @@ def test_ocr_endpoint_fallback_and_breaker(monkeypatch):
         raise httpx.ConnectError("down")
     monkeypatch.setattr(ocr_mod.httpx, "post", boom)
     for _ in range(5):
-        assert emp.post("/expenses/ocr", data={"csrf_token": t}, files=files).json()["ok"] is False
+        with pytest.raises(ocr_mod.OcrError):
+            ocr_mod.extract(jpeg(), "image/jpeg")
     assert len(calls) == 3
-    # OCRが失敗していても、手入力で申請は通る
-    assert create(emp).status_code == 303
     ocr_mod.breaker.__init__()

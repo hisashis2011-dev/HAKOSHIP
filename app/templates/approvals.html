@@ -1,13 +1,12 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>承認待ち</h1>
-{% if not items %}<p class="muted">承認待ちの申請はありません。</p>{% endif %}
+{% if not items %}<p class="muted">承認待ちの精算書はありません。</p>{% endif %}
 <ul class="cards">
-{% for e in items %}
-  <li><a href="/expenses/{{ e.id }}">
-    <div class="row between"><strong>{{ e.user.name }} ／ {{ e.payee }}</strong><span class="amt">¥{{ '{:,}'.format(e.amount) }}</span></div>
-    <div class="row between small muted"><span>{{ e.expense_date }} ・ {{ e.property_code }} ・ {{ e.category }}</span>{% include "_status.html" %}</div>
-    <div class="small">{{ e.purpose|truncate(60) }}</div>
+{% for r in items %}
+  <li><a href="/reports/{{ r.id }}">
+    <div class="row between"><strong>{{ r.user.name }} ／ 精算書 #{{ r.id }}（{{ r.lines|length }}件）</strong><span class="amt">¥{{ '{:,}'.format(r.total) }}</span></div>
+    <div class="row between small muted"><span>申請 {{ r.submitted_at.strftime('%Y-%m-%d') }}</span>{% include "_status.html" %}</div>
   </a></li>
 {% endfor %}
 </ul>

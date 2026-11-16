@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import io
 import re
@@ -8,22 +9,24 @@ from datetime import date, datetime, timedelta
 from fastapi import FastAPI, Depends, Request, Form, File, UploadFile, HTTPException
 from fastapi.responses import RedirectResponse, FileResponse, Response, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.concurrency import run_in_threadpool
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, func, or_
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import workflow, receipts, ocr
-from .config import (BASE_DIR, SECRET_KEY, COOKIE_SECURE, SESSION_HOURS, CATEGORIES, MAX_AMOUNT)
+from .config import (BASE_DIR, SECRET_KEY, COOKIE_SECURE, SESSION_HOURS, MAX_AMOUNT, MAX_LINES,
+                     MAX_FILES_PER_UPLOAD)
 from .db import Base, engine, get_db
-from .models import (User, Property, Expense, ApprovalLog, ROLE_LABELS, STATUS_LABELS, ACTION_LABELS,
-                     EMPLOYEE, ACCOUNTING, ADMIN, DRAFT, PENDING_MANAGER, PENDING_ACCOUNTING,
-                     APPROVED, PAID)
+from .models import (User, Department, Project, Report, ExpenseLine, ApprovalLog, ROLE_LABELS,
+                     STATUS_LABELS, ACTION_LABELS, EMPLOYEE, ACCOUNTING, ADMIN, DRAFT, PENDING_MANAGER,
+                     PENDING_ACCOUNTING, APPROVED, PAID)
 from .security import hash_password, verify_password, temp_password, LoginThrottle
 
-app = FastAPI(title="HAKOSHIP 経費精算", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="エムビーエス 経費精算", docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=SESSION_HOURS * 3600,
-                   same_site="lax", https_only=COOKIE_SECURE, session_cookie="hakoship_session")
+                   same_site="lax", https_only=COOKIE_SECURE, session_cookie="mbs_session")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "app" / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "app" / "templates")
 throttle = LoginThrottle()
@@ -79,7 +82,7 @@ def admin_user(user: User = Depends(current_user)) -> User:
 def render(request: Request, name: str, user: User | None = None, status_code=200, **ctx):
     ctx.update(user=user, todo=getattr(request.state, 'todo', 0), csrf=csrf_token(request), flashes=request.session.pop("flash", []),
                STATUS_LABELS=STATUS_LABELS, ROLE_LABELS=ROLE_LABELS, ACTION_LABELS=ACTION_LABELS,
-               CATEGORIES=CATEGORIES, ocr_enabled=ocr.enabled())
+               ocr_enabled=ocr.enabled(), MAX_FILES=MAX_FILES_PER_UPLOAD)
     return templates.TemplateResponse(request, name, ctx, status_code=status_code)
 
 
@@ -95,26 +98,32 @@ def norm(s: str) -> str:
     return unicodedata.normalize("NFKC", s or "").strip()
 
 
-def get_expense(db: Session, eid: int, user: User) -> Expense:
-    e = db.scalar(select(Expense).options(joinedload(Expense.user), joinedload(Expense.property))
-                  .where(Expense.id == eid))
-    if not e or not workflow.can_view(user, e):
-        raise HTTPException(404, "申請が見つかりません")
-    return e
+def get_report(db: Session, rid: int, user: User) -> Report:
+    r = db.scalar(select(Report).options(joinedload(Report.user), joinedload(Report.department),
+                                         selectinload(Report.lines)).where(Report.id == rid))
+    if not r or not workflow.can_view(user, r):
+        raise HTTPException(404, "精算書が見つかりません")
+    return r
 
 
-def pending_for(db: Session, user: User) -> list[Expense]:
-    """自分が処理すべき申請"""
-    conds = []
-    mgr = (Expense.status == PENDING_MANAGER) & Expense.user.has(User.approver_id == user.id)
-    conds.append(mgr)
+def pending_for(db: Session, user: User) -> list[Report]:
+    """自分が処理すべき精算書"""
+    conds = [(Report.status == PENDING_MANAGER) & Report.user.has(User.approver_id == user.id)]
     if user.is_admin:
-        conds.append(Expense.status == PENDING_MANAGER)
+        conds.append(Report.status == PENDING_MANAGER)
     if user.is_accounting:
-        conds.append(Expense.status == PENDING_ACCOUNTING)
-    q = (select(Expense).options(joinedload(Expense.user), joinedload(Expense.property))
-         .where(or_(*conds), Expense.user_id != user.id).order_by(Expense.submitted_at))
+        conds.append(Report.status == PENDING_ACCOUNTING)
+    q = (select(Report).options(joinedload(Report.user), selectinload(Report.lines))
+         .where(or_(*conds), Report.user_id != user.id).order_by(Report.submitted_at))
     return list(db.scalars(q))
+
+
+def projects_active(db):
+    return list(db.scalars(select(Project).where(Project.is_active).order_by(Project.code)))
+
+
+def departments_active(db):
+    return list(db.scalars(select(Department).where(Department.is_active).order_by(Department.code)))
 
 
 # ------------------------------------------------------------ auth
@@ -164,209 +173,287 @@ def password_change(request: Request, current: str = Form(...), new: str = Form(
     return go("/")
 
 
-# ------------------------------------------------------------ expenses (applicant)
+# ------------------------------------------------------------ reports (applicant)
 @app.get("/", response_class=HTMLResponse)
-def my_expenses(request: Request, status: str = "", user: User = Depends(current_user),
-                db: Session = Depends(get_db)):
-    q = (select(Expense).options(joinedload(Expense.property))
-         .where(Expense.user_id == user.id).order_by(Expense.expense_date.desc(), Expense.id.desc()))
+def my_reports(request: Request, status: str = "", user: User = Depends(current_user),
+               db: Session = Depends(get_db)):
+    q = (select(Report).options(selectinload(Report.lines)).where(Report.user_id == user.id)
+         .order_by(Report.id.desc()))
     if status in STATUS_LABELS:
-        q = q.where(Expense.status == status)
-    items = list(db.scalars(q))
-    return render(request, "list.html", user, items=items, status=status)
+        q = q.where(Report.status == status)
+    return render(request, "list.html", user, items=list(db.scalars(q)), status=status)
 
 
-def _properties(db):
-    return list(db.scalars(select(Property).where(Property.is_active).order_by(Property.code)))
+@app.post("/reports/new", dependencies=[Depends(verify_csrf)])
+def report_new(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    r = Report(user_id=user.id, department_code=user.department_code)
+    db.add(r)
+    db.commit()
+    return go(f"/reports/{r.id}/edit")
 
 
-def _validate(db: Session, f: dict) -> tuple[dict, list[str]]:
+LINE_FIELDS = ("date", "dept", "project", "payee", "amount", "purpose", "invoice")
+
+
+def line_row(l: ExpenseLine) -> dict:
+    return {"date": l.expense_date.isoformat() if l.expense_date else "", "dept": l.department_code or "",
+            "project": l.project_code or "", "payee": l.payee or "",
+            "amount": str(l.amount) if l.amount is not None else "", "purpose": l.purpose or "",
+            "invoice": l.invoice_no or ""}
+
+
+def validate_row(db: Session, row: dict, require: bool) -> tuple[dict, list[str]]:
+    """明細1行の検証。require=False(下書き保存)は入力済み項目の形式のみ、True(申請)は必須も確認"""
     errs, c = [], {}
-    try:
-        c["expense_date"] = date.fromisoformat(norm(f["expense_date"]))
-        if c["expense_date"] > date.today():
-            errs.append("利用日に未来の日付は指定できません")
-    except ValueError:
-        errs.append("利用日を入力してください")
-    try:
-        c["amount"] = int(re.sub(r"[,円¥\s]", "", norm(f["amount"])))
-        if not 1 <= c["amount"] <= MAX_AMOUNT:
-            errs.append(f"金額は1〜{MAX_AMOUNT:,}円の範囲で入力してください")
-    except ValueError:
-        errs.append("金額は数字で入力してください")
-    c["payee"] = norm(f["payee"])
+
+    def need(msg):
+        if require:
+            errs.append(msg)
+
+    v = norm(row["date"])
+    c["expense_date"] = None
+    if v:
+        try:
+            c["expense_date"] = date.fromisoformat(v)
+            if c["expense_date"] > date.today():
+                errs.append("支払日に未来の日付は指定できません")
+        except ValueError:
+            errs.append("支払日の形式が不正です")
+    else:
+        need("支払日を入力してください")
+
+    v = re.sub(r"[,円¥\s]", "", norm(row["amount"]))
+    c["amount"] = None
+    if v:
+        try:
+            c["amount"] = int(v)
+            if not 1 <= c["amount"] <= MAX_AMOUNT:
+                errs.append(f"金額は1〜{MAX_AMOUNT:,}円の範囲で入力してください")
+        except ValueError:
+            errs.append("金額は数字で入力してください")
+    else:
+        need("金額を入力してください")
+
+    c["payee"] = norm(row["payee"]) or None
     if not c["payee"]:
-        errs.append("支払先(店名)を入力してください")
-    c["category"] = norm(f["category"])
-    if c["category"] not in CATEGORIES:
-        errs.append("勘定科目を選択してください")
-    c["purpose"] = f["purpose"].strip()
+        need("支払先を入力してください")
+
+    c["purpose"] = row["purpose"].strip()
     if not c["purpose"]:
-        errs.append("使用目的を入力してください")
+        need("支払内容・支払目的を入力してください")
     elif len(c["purpose"]) > 500:
-        errs.append("使用目的は500文字以内で入力してください")
-    code = norm(f["property_code"]).upper()
-    p = db.get(Property, code) if code else None
-    if not p or not p.is_active:
-        errs.append("物件コードがマスタにありません。入力候補から選択してください")
-    c["property_code"] = code
-    inv = norm(f["invoice_no"]).upper()
+        errs.append("支払内容・支払目的は500文字以内で入力してください")
+
+    code = norm(row["project"]).upper()
+    c["project_code"] = None
+    if code:
+        p = db.get(Project, code)
+        if not p or not p.is_active:
+            errs.append(f"工事コード「{code}」がマスタにありません。候補から選択してください")
+        else:
+            c["project_code"] = code
+    else:
+        need("工事コードを入力してください")
+
+    dcode = norm(row["dept"])
+    c["department_code"] = None
+    if dcode:
+        d = db.get(Department, dcode)
+        if not d or not d.is_active:
+            errs.append(f"部門コード「{dcode}」がマスタにありません")
+        else:
+            c["department_code"] = dcode
+    elif require and db.scalar(select(func.count()).select_from(Department).where(Department.is_active)):
+        errs.append("部門コードを選択してください")
+
+    inv = norm(row["invoice"]).upper()
     if inv and not re.fullmatch(r"T\d{13}", inv):
         errs.append("インボイス登録番号は「T」+数字13桁で入力してください(不明なら空欄)")
-    c["invoice_no"] = inv or None
+    c["invoice_no"] = inv if re.fullmatch(r"T\d{13}", inv) else None
     return c, errs
 
 
-async def _save_expense(request: Request, db: Session, user: User, e: Expense | None,
-                        f: dict, receipt: UploadFile | None, action: str):
-    new_file = bool(receipt and receipt.filename)
-    data = await receipt.read() if new_file else b""
-    c, errs = _validate(db, f)
-    if not new_file and not (e and e.receipt_path):
-        errs.append("領収書の写真またはPDFを添付してください")
+def render_edit(request, user, r, db, rows=None, errors=None, advance=None, note=None, status_code=200):
+    rows = rows or {l.id: line_row(l) for l in r.lines}
+    return render(request, "report_edit.html", user, status_code, r=r, rows=rows, errors=errors or [],
+                  advance=str(r.advance_amount or 0) if advance is None else advance,
+                  note=r.note if note is None else note,
+                  projects=projects_active(db), departments=departments_active(db))
 
-    saved = None
-    if new_file and not errs:
+
+@app.get("/reports/{rid}/edit", response_class=HTMLResponse)
+def report_edit(rid: int, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    r = get_report(db, rid, user)
+    if not workflow.can_edit(user, r):
+        raise HTTPException(403, "編集できません")
+    return render_edit(request, user, r, db)
+
+
+@app.post("/reports/{rid}/receipts", dependencies=[Depends(verify_csrf)])
+async def report_receipts(rid: int, request: Request, receipts_files: list[UploadFile] = File(..., alias="files"),
+                          user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """領収書を複数まとめて取り込む。1枚=1明細。AI(設定時)で日付・金額・支払先を下書き入力"""
+    r = get_report(db, rid, user)
+    if not workflow.can_edit(user, r):
+        raise HTTPException(403, "編集できません")
+    files = [f for f in receipts_files if f.filename][:MAX_FILES_PER_UPLOAD]
+    room = MAX_LINES - len(r.lines)
+    msgs, prepared, seen = [], [], set()
+    for f in files:
+        if len(prepared) >= room:
+            msgs.append(f"明細は{MAX_LINES}行までです。超過分は取り込みませんでした")
+            break
         try:
-            saved = receipts.save_receipt(data)
+            out, mime, ext = receipts.normalize(await f.read())
         except receipts.ReceiptError as ex:
-            errs.append(str(ex))
-        else:
-            dup = db.scalar(select(Expense).where(Expense.receipt_sha256 == saved[2],
-                                                  Expense.id != (e.id if e else -1)))
-            if dup:
-                receipts.delete_receipt(saved[0])
-                saved = None
-                errs.append(f"同じ領収書が既に登録されています(申請 #{dup.id})")
-    if errs:
-        if saved:
-            receipts.delete_receipt(saved[0])
-        return render(request, "form.html", user, 400, e=e, f=f, errors=errs, properties=_properties(db))
+            msgs.append(f"{f.filename}: {ex}")
+            continue
+        h = receipts.sha256(out)
+        if h in seen or db.scalar(select(ExpenseLine.id).where(ExpenseLine.receipt_sha256 == h)):
+            msgs.append(f"{f.filename}: 登録済みの領収書です(重複のため取り込みませんでした)")
+            continue
+        seen.add(h)
+        prepared.append((out, mime, ext, h))
 
-    if e is None:
-        e = Expense(user_id=user.id, **c)
-        e.user = user
-        db.add(e)
+    sem = asyncio.Semaphore(4)
+
+    async def read_ai(out, mime):
+        if not ocr.enabled():
+            return {}
+        async with sem:
+            try:
+                return await run_in_threadpool(ocr.extract, out, mime)
+            except ocr.OcrError:
+                return {}
+
+    results = await asyncio.gather(*[read_ai(o, m) for o, m, _, _ in prepared])
+    filled = 0
+    for (out, mime, ext, h), fields in zip(prepared, results):
+        d = fields.get("expense_date")
+        line = ExpenseLine(
+            report_id=r.id, department_code=r.department_code,
+            expense_date=date.fromisoformat(d) if d else None, amount=fields.get("amount"),
+            payee=fields.get("payee"), invoice_no=fields.get("invoice_no"), purpose="",
+            receipt_path=receipts.store(out, ext), receipt_mime=mime, receipt_sha256=h,
+            receipt_uploaded_at=datetime.now())
+        db.add(line)
+        filled += bool(fields)
+    db.commit()
+    if prepared:
+        flash(request, f"{len(prepared)}枚を取り込みました" + (f"(うち{filled}枚はAIが自動入力。必ず内容を確認してください)"
+              if filled else "。各行の内容を入力してください"))
+    for m in msgs:
+        flash(request, m, "warn")
+    return go(f"/reports/{rid}/edit")
+
+
+@app.post("/reports/{rid}/save", dependencies=[Depends(verify_csrf)])
+async def report_save(rid: int, request: Request, user: User = Depends(current_user),
+                      db: Session = Depends(get_db)):
+    r = get_report(db, rid, user)
+    if not workflow.can_edit(user, r):
+        raise HTTPException(403, "編集できません")
+    form = await request.form()
+    action = str(form.get("action", "save"))
+    submitting = action == "submit"
+    rows, cleans, errs = {}, {}, []
+    for i, l in enumerate(r.lines, 1):
+        row = {f: str(form.get(f"{f}_{l.id}", "")) for f in LINE_FIELDS}
+        rows[l.id] = row
+        c, e = validate_row(db, row, require=submitting)
+        cleans[l.id] = (c, bool(e))
+        errs += [f"{i}行目: {m}" for m in e]
+    adv_raw = re.sub(r"[,円¥\s]", "", norm(str(form.get("advance", "0")))) or "0"
+    note = str(form.get("note", "")).strip()[:500]
+    advance = None
+    if adv_raw.isdigit() and int(adv_raw) <= MAX_AMOUNT * 10:
+        advance = int(adv_raw)
     else:
+        errs.append("仮払金は0以上の数字で入力してください")
+    if submitting and not r.lines:
+        errs.append("明細がありません。領収書を追加してください")
+
+    structural = action.startswith("delete:") or action == "addrow"
+    if errs and not structural:
+        return render_edit(request, user, r, db, rows, errs, str(form.get("advance", "0")), note, 400)
+
+    for l in r.lines:  # 保存(構造変更時は検証OKの行のみ反映)
+        c, bad = cleans[l.id]
+        if bad:
+            continue
         for k, v in c.items():
-            setattr(e, k, v)
-    if saved:
-        receipts.delete_receipt(e.receipt_path)
-        e.receipt_path, e.receipt_mime, e.receipt_sha256 = saved
-        e.receipt_uploaded_at = datetime.now()
-    db.flush()
-    if action == "submit":
-        similar = db.scalar(select(func.count()).select_from(Expense).where(
-            Expense.user_id == user.id, Expense.id != e.id, Expense.expense_date == e.expense_date,
-            Expense.amount == e.amount, Expense.payee == e.payee))
-        workflow.submit(db, e, user)
+            setattr(l, k, v)
+    if advance is not None:
+        r.advance_amount = advance
+    r.note = note
+
+    if action.startswith("delete:"):
+        victim = next((l for l in r.lines if str(l.id) == action[7:]), None)
+        if victim:
+            receipts.delete_receipt(victim.receipt_path)
+            r.lines.remove(victim)
+            flash(request, "明細を削除しました")
         db.commit()
-        flash(request, "申請しました" + ("(同日・同額・同支払先の申請が他にもあります。重複でないかご確認ください)"
+        return go(f"/reports/{rid}/edit")
+    if action == "addrow":
+        if len(r.lines) >= MAX_LINES:
+            flash(request, f"明細は{MAX_LINES}行までです", "err")
+        else:
+            r.lines.append(ExpenseLine(department_code=r.department_code, no_receipt=True))
+        db.commit()
+        return go(f"/reports/{rid}/edit")
+    if submitting:
+        similar = 0
+        for l in r.lines:
+            similar += db.scalar(select(func.count()).select_from(ExpenseLine).join(Report).where(
+                Report.user_id == user.id, Report.id != r.id, Report.status != DRAFT,
+                ExpenseLine.expense_date == l.expense_date, ExpenseLine.amount == l.amount,
+                ExpenseLine.payee == l.payee)) or 0
+        workflow.submit(db, r, user)
+        db.commit()
+        flash(request, "申請しました" + (f"(過去の申請に同日・同額・同支払先の明細が{similar}件あります。重複でないかご確認ください)"
                                        if similar else ""), "warn" if similar else "ok")
-    else:
-        db.commit()
-        flash(request, "下書きを保存しました")
-    return go(f"/expenses/{e.id}")
+        return go(f"/reports/{rid}")
+    db.commit()
+    flash(request, "下書きを保存しました")
+    return go(f"/reports/{rid}/edit")
 
 
-def _blank_form():
-    return {"expense_date": date.today().isoformat(), "amount": "", "payee": "", "category": "",
-            "purpose": "", "property_code": "", "invoice_no": ""}
+@app.get("/reports/{rid}", response_class=HTMLResponse)
+def report_detail(rid: int, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    r = get_report(db, rid, user)
+    return render(request, "report_detail.html", user, r=r, can_act=workflow.can_act(user, r),
+                  can_edit=workflow.can_edit(user, r))
 
 
-@app.get("/expenses/new", response_class=HTMLResponse)
-def new_page(request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    return render(request, "form.html", user, e=None, f=_blank_form(), errors=[], properties=_properties(db))
+@app.get("/reports/{rid}/print", response_class=HTMLResponse)
+def report_print(rid: int, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    r = get_report(db, rid, user)
+    depts = list(db.scalars(select(Department).order_by(Department.code)))
+    return render(request, "report_print.html", user, r=r, depts=depts, blank_rows=max(0, 20 - len(r.lines)))
 
 
-@app.post("/expenses/new", dependencies=[Depends(verify_csrf)])
-async def new_submit(request: Request, expense_date: str = Form(""), amount: str = Form(""),
-                     payee: str = Form(""), category: str = Form(""), purpose: str = Form(""),
-                     property_code: str = Form(""), invoice_no: str = Form(""),
-                     action: str = Form("save"), receipt: UploadFile | None = File(None),
-                     user: User = Depends(current_user), db: Session = Depends(get_db)):
-    f = dict(expense_date=expense_date, amount=amount, payee=payee, category=category,
-             purpose=purpose, property_code=property_code, invoice_no=invoice_no)
-    return await _save_expense(request, db, user, None, f, receipt, action)
-
-
-@app.post("/expenses/ocr", dependencies=[Depends(verify_csrf)])
-async def ocr_receipt(request: Request, receipt: UploadFile = File(...), user: User = Depends(current_user)):
-    """領収書の自動読み取り。失敗しても ok:false を返すだけで、画面側は手入力を続けられる"""
-    from fastapi.concurrency import run_in_threadpool
-    try:
-        data, mime, _ = receipts.normalize(await receipt.read())
-        fields = await run_in_threadpool(ocr.extract, data, mime)
-    except (receipts.ReceiptError, ocr.OcrError):
-        return {"ok": False, "fields": {}}
-    return {"ok": bool(fields), "fields": fields}
-
-
-@app.get("/expenses/{eid}", response_class=HTMLResponse)
-def detail(eid: int, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    e = get_expense(db, eid, user)
-    return render(request, "detail.html", user, e=e, can_act=workflow.can_act(user, e),
-                  can_edit=workflow.can_edit(user, e))
-
-
-@app.get("/expenses/{eid}/edit", response_class=HTMLResponse)
-def edit_page(eid: int, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    e = get_expense(db, eid, user)
-    if not workflow.can_edit(user, e):
-        raise HTTPException(403, "編集できません")
-    f = dict(expense_date=e.expense_date.isoformat(), amount=str(e.amount), payee=e.payee,
-             category=e.category, purpose=e.purpose, property_code=e.property_code,
-             invoice_no=e.invoice_no or "")
-    return render(request, "form.html", user, e=e, f=f, errors=[], properties=_properties(db))
-
-
-@app.post("/expenses/{eid}/edit", dependencies=[Depends(verify_csrf)])
-async def edit_submit(eid: int, request: Request, expense_date: str = Form(""), amount: str = Form(""),
-                      payee: str = Form(""), category: str = Form(""), purpose: str = Form(""),
-                      property_code: str = Form(""), invoice_no: str = Form(""),
-                      action: str = Form("save"), receipt: UploadFile | None = File(None),
-                      user: User = Depends(current_user), db: Session = Depends(get_db)):
-    e = get_expense(db, eid, user)
-    if not workflow.can_edit(user, e):
-        raise HTTPException(403, "編集できません")
-    f = dict(expense_date=expense_date, amount=amount, payee=payee, category=category,
-             purpose=purpose, property_code=property_code, invoice_no=invoice_no)
-    return await _save_expense(request, db, user, e, f, receipt, action)
-
-
-@app.post("/expenses/{eid}/submit", dependencies=[Depends(verify_csrf)])
-def submit_existing(eid: int, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    e = get_expense(db, eid, user)
-    try:
-        workflow.submit(db, e, user)
-    except workflow.WorkflowError as ex:
-        flash(request, str(ex), "err")
-    else:
-        db.commit()
-        flash(request, "申請しました")
-    return go(f"/expenses/{eid}")
-
-
-@app.post("/expenses/{eid}/delete", dependencies=[Depends(verify_csrf)])
-def delete_draft(eid: int, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    e = get_expense(db, eid, user)
-    if not workflow.can_edit(user, e) or e.history:
-        raise HTTPException(403, "削除できません(一度申請された申請は削除できません)")
-    receipts.delete_receipt(e.receipt_path)
-    db.delete(e)
+@app.post("/reports/{rid}/delete", dependencies=[Depends(verify_csrf)])
+def report_delete(rid: int, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    r = get_report(db, rid, user)
+    if not workflow.can_edit(user, r) or r.history:
+        raise HTTPException(403, "削除できません(一度申請された精算書は削除できません)")
+    for l in r.lines:
+        receipts.delete_receipt(l.receipt_path)
+    db.delete(r)
     db.commit()
     flash(request, "下書きを削除しました")
     return go("/")
 
 
-@app.get("/expenses/{eid}/receipt")
-def receipt_view(eid: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    e = get_expense(db, eid, user)
-    if not e.receipt_path:
+@app.get("/lines/{lid}/receipt")
+def receipt_view(lid: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    l = db.get(ExpenseLine, lid)
+    if not l or not l.receipt_path:
         raise HTTPException(404)
-    return FileResponse(receipts.receipt_file(e.receipt_path), media_type=e.receipt_mime,
-                        headers={"Cache-Control": "private, max-age=3600",
-                                 "X-Content-Type-Options": "nosniff"})
+    get_report(db, l.report_id, user)  # 閲覧権限チェック
+    return FileResponse(receipts.receipt_file(l.receipt_path), media_type=l.receipt_mime,
+                        headers={"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"})
 
 
 # ------------------------------------------------------------ approval
@@ -375,22 +462,22 @@ def approvals(request: Request, user: User = Depends(current_user), db: Session 
     return render(request, "approvals.html", user, items=pending_for(db, user))
 
 
-@app.post("/expenses/{eid}/decide", dependencies=[Depends(verify_csrf)])
-def decide(eid: int, request: Request, decision: str = Form(...), comment: str = Form(""),
+@app.post("/reports/{rid}/decide", dependencies=[Depends(verify_csrf)])
+def decide(rid: int, request: Request, decision: str = Form(...), comment: str = Form(""),
            user: User = Depends(current_user), db: Session = Depends(get_db)):
-    e = get_expense(db, eid, user)
+    r = get_report(db, rid, user)
     try:
         if decision == "approve":
-            workflow.approve(db, e, user, comment)
+            workflow.approve(db, r, user, comment)
             msg = "承認しました"
         elif decision == "return":
-            workflow.send_back(db, e, user, comment)
+            workflow.send_back(db, r, user, comment)
             msg = "差し戻しました"
         else:
             raise HTTPException(400)
     except workflow.WorkflowError as ex:
         flash(request, str(ex), "err")
-        return go(f"/expenses/{eid}")
+        return go(f"/reports/{rid}")
     db.commit()
     flash(request, msg)
     return go("/approvals")
@@ -407,31 +494,31 @@ def _month_range(month: str):
     return start, end
 
 
-def _accounting_query(month: str, status: str, q: str, prop: str):
+def _accounting_query(month: str, status: str, q: str, proj: str):
     start, end = _month_range(month)
-    stmt = (select(Expense).options(joinedload(Expense.user), joinedload(Expense.property))
-            .where(Expense.expense_date >= start, Expense.expense_date < end, Expense.status != DRAFT)
-            .order_by(Expense.expense_date, Expense.id))
+    stmt = (select(Report).options(joinedload(Report.user), selectinload(Report.lines), joinedload(Report.department))
+            .where(Report.submitted_at >= datetime.combine(start, datetime.min.time()),
+                   Report.submitted_at < datetime.combine(end, datetime.min.time()), Report.status != DRAFT)
+            .order_by(Report.submitted_at, Report.id))
     if status in STATUS_LABELS:
-        stmt = stmt.where(Expense.status == status)
-    if prop:
-        stmt = stmt.where(Expense.property_code == norm(prop).upper())
+        stmt = stmt.where(Report.status == status)
+    if proj:
+        stmt = stmt.where(Report.lines.any(ExpenseLine.project_code == norm(proj).upper()))
     if q:
         like = f"%{norm(q)}%"
-        stmt = stmt.where(or_(Expense.payee.like(like), Expense.purpose.like(like),
-                              Expense.user.has(User.name.like(like))))
+        stmt = stmt.where(or_(Report.user.has(User.name.like(like)),
+                              Report.lines.any(or_(ExpenseLine.payee.like(like), ExpenseLine.purpose.like(like)))))
     return stmt, start
 
 
 @app.get("/accounting", response_class=HTMLResponse)
-def accounting(request: Request, month: str = "", status: str = "", q: str = "", prop: str = "",
+def accounting(request: Request, month: str = "", status: str = "", q: str = "", proj: str = "",
                user: User = Depends(accounting_user), db: Session = Depends(get_db)):
     month = month or date.today().strftime("%Y-%m")
-    stmt, start = _accounting_query(month, status, q, prop)
+    stmt, start = _accounting_query(month, status, q, proj)
     items = list(db.scalars(stmt))
-    total = sum(i.amount for i in items)
-    return render(request, "accounting.html", user, items=items, month=start.strftime("%Y-%m"),
-                  status=status, q=q, prop=prop, total=total, properties=_properties(db))
+    return render(request, "accounting.html", user, items=items, month=start.strftime("%Y-%m"), status=status,
+                  q=q, proj=proj, total=sum(i.total for i in items), projects=projects_active(db))
 
 
 @app.post("/accounting/pay", dependencies=[Depends(verify_csrf)])
@@ -439,9 +526,9 @@ async def accounting_pay(request: Request, user: User = Depends(accounting_user)
     form = await request.form()
     ids = [int(x) for x in form.getlist("ids") if str(x).isdigit()]
     n = 0
-    for e in db.scalars(select(Expense).options(joinedload(Expense.user)).where(Expense.id.in_(ids))):
+    for r in db.scalars(select(Report).options(joinedload(Report.user)).where(Report.id.in_(ids))):
         try:
-            workflow.mark_paid(db, e, user)
+            workflow.mark_paid(db, r, user)
             n += 1
         except workflow.WorkflowError:
             pass
@@ -456,29 +543,42 @@ def _csv_safe(v) -> str:
 
 
 @app.get("/accounting/export.csv")
-def export_csv(month: str = "", status: str = "", q: str = "", prop: str = "",
+def export_csv(month: str = "", status: str = "", q: str = "", proj: str = "",
                user: User = Depends(accounting_user), db: Session = Depends(get_db)):
+    """明細単位のCSV(1行=精算書の1明細)。精算書ごとの仮払金・差引過不足は各行に付記"""
     month = month or date.today().strftime("%Y-%m")
-    stmt, start = _accounting_query(month, status, q, prop)
+    stmt, start = _accounting_query(month, status, q, proj)
+    depts = {d.code: d.name for d in db.scalars(select(Department))}
+    projs = {p.code: p.name for p in db.scalars(select(Project))}
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["申請ID", "利用日", "申請者", "社員メール", "支払先", "金額", "勘定科目", "物件コード", "物件名",
-                "使用目的", "インボイス番号", "申請日時", "最終承認日時", "精算日時", "状況"])
-    for e in db.scalars(stmt):
-        d = lambda x: x.strftime("%Y-%m-%d %H:%M") if x else ""
-        w.writerow([e.id, e.expense_date.isoformat(), *map(_csv_safe, [e.user.name, e.user.email, e.payee]),
-                    e.amount, e.category, e.property_code, _csv_safe(e.property.name), _csv_safe(e.purpose),
-                    e.invoice_no or "", d(e.submitted_at), d(e.approved_at), d(e.paid_at), STATUS_LABELS[e.status]])
-    body = "﻿" + buf.getvalue()  # Excelで文字化けしないようBOM付きUTF-8
-    return Response(body, media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition": f'attachment; filename="expenses_{start:%Y%m}.csv"'})
+    w.writerow(["精算書ID", "申請日", "申請者", "社員メール", "所属部門", "行", "部門コード", "部門名", "支払日",
+                "工事コード", "工事名", "支払先", "支払金額", "支払内容・支払目的", "インボイス番号", "領収書",
+                "精算書合計①", "仮払金②", "差引過不足③", "最終承認日時", "精算日時", "状況"])
+    d = lambda x: x.strftime("%Y-%m-%d %H:%M") if x else ""
+    for r in db.scalars(stmt):
+        for n, l in enumerate(r.lines, 1):
+            w.writerow([r.id, d(r.submitted_at), _csv_safe(r.user.name), _csv_safe(r.user.email),
+                        r.department_code or "", n, l.department_code or "", _csv_safe(depts.get(l.department_code, "")),
+                        l.expense_date.isoformat() if l.expense_date else "", l.project_code or "",
+                        _csv_safe(projs.get(l.project_code, "")), _csv_safe(l.payee), l.amount or 0,
+                        _csv_safe(l.purpose), l.invoice_no or "", "なし" if l.no_receipt else "あり",
+                        r.total, r.advance_amount, r.balance, d(r.approved_at), d(r.paid_at), STATUS_LABELS[r.status]])
+    return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="mbs_expenses_{start:%Y%m}.csv"'})
 
 
 # ------------------------------------------------------------ admin
 @app.get("/admin/users", response_class=HTMLResponse)
 def admin_users(request: Request, user: User = Depends(admin_user), db: Session = Depends(get_db)):
     users = list(db.scalars(select(User).order_by(User.is_active.desc(), User.name)))
-    return render(request, "admin_users.html", user, users=users, new_pw=request.session.pop("new_pw", None))
+    return render(request, "admin_users.html", user, users=users, new_pw=request.session.pop("new_pw", None),
+                  departments=departments_active(db))
+
+
+def _dept_or_none(db, code: str):
+    code = norm(code)
+    return code if code and db.get(Department, code) else None
 
 
 def _set_approver(db, u: User, approver_email: str) -> str | None:
@@ -497,13 +597,15 @@ def _set_approver(db, u: User, approver_email: str) -> str | None:
 
 @app.post("/admin/users", dependencies=[Depends(verify_csrf)])
 def admin_user_add(request: Request, email: str = Form(...), name: str = Form(...), role: str = Form(EMPLOYEE),
-                   approver_email: str = Form(""), user: User = Depends(admin_user), db: Session = Depends(get_db)):
+                   approver_email: str = Form(""), department_code: str = Form(""),
+                   user: User = Depends(admin_user), db: Session = Depends(get_db)):
     email = norm(email).lower()
     if role not in ROLE_LABELS or db.scalar(select(User).where(User.email == email)):
         flash(request, "ロールが不正、またはメールアドレスが既に登録されています", "err")
         return go("/admin/users")
     pw = temp_password()
-    u = User(email=email, name=norm(name), role=role, password_hash=hash_password(pw))
+    u = User(email=email, name=norm(name), role=role, password_hash=hash_password(pw),
+             department_code=_dept_or_none(db, department_code))
     err = _set_approver(db, u, approver_email)
     if err:
         flash(request, err, "err")
@@ -516,7 +618,7 @@ def admin_user_add(request: Request, email: str = Form(...), name: str = Form(..
 
 @app.post("/admin/users/import", dependencies=[Depends(verify_csrf)])
 async def admin_user_import(request: Request, user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    """CSV一括登録。列: email,name,role(employee/accounting/admin),approver_email"""
+    """CSV一括登録。列: email,name,role(employee/accounting/admin),approver_email,department_code"""
     form = await request.form()
     up = form.get("file")
     if not up or not getattr(up, "filename", ""):
@@ -533,7 +635,8 @@ async def admin_user_import(request: Request, user: User = Depends(admin_user), 
             errors.append(f"{i}行目: 不正または登録済み({email or '空'})")
             continue
         pw = temp_password()
-        u = User(email=email, name=name, role=role, password_hash=hash_password(pw))
+        u = User(email=email, name=name, role=role, password_hash=hash_password(pw),
+                 department_code=_dept_or_none(db, r.get("department_code", "")))
         db.add(u)
         db.flush()
         created.append((u, norm(r.get("approver_email", ""))))
@@ -551,7 +654,7 @@ async def admin_user_import(request: Request, user: User = Depends(admin_user), 
 
 @app.post("/admin/users/{uid}", dependencies=[Depends(verify_csrf)])
 def admin_user_update(uid: int, request: Request, name: str = Form(...), role: str = Form(...),
-                      approver_email: str = Form(""), is_active: str = Form(""),
+                      approver_email: str = Form(""), is_active: str = Form(""), department_code: str = Form(""),
                       user: User = Depends(admin_user), db: Session = Depends(get_db)):
     u = db.get(User, uid)
     if not u or role not in ROLE_LABELS:
@@ -564,6 +667,7 @@ def admin_user_update(uid: int, request: Request, name: str = Form(...), role: s
         flash(request, err, "err")
         return go("/admin/users")
     u.name, u.role, u.is_active = norm(name), role, bool(is_active)
+    u.department_code = _dept_or_none(db, department_code)
     db.commit()
     flash(request, f"{u.name} を更新しました")
     return go("/admin/users")
@@ -581,44 +685,60 @@ def admin_user_reset(uid: int, request: Request, user: User = Depends(admin_user
     return go("/admin/users")
 
 
-@app.get("/admin/properties", response_class=HTMLResponse)
-def admin_properties(request: Request, user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    props = list(db.scalars(select(Property).order_by(Property.code)))
-    return render(request, "admin_properties.html", user, props=props)
+MASTERS = {
+    "projects": dict(model=Project, title="工事マスタ(工事コード)", label="工事", pattern=r"[A-Z0-9_\-]{1,30}"),
+    "departments": dict(model=Department, title="部門マスタ(部門コード)", label="部門", pattern=r"[0-9A-Z_\-]{1,10}"),
+}
 
 
-@app.post("/admin/properties", dependencies=[Depends(verify_csrf)])
-def admin_property_save(request: Request, code: str = Form(...), name: str = Form(...), is_active: str = Form(""),
-                        user: User = Depends(admin_user), db: Session = Depends(get_db)):
+def _master(kind: str) -> dict:
+    if kind not in MASTERS:
+        raise HTTPException(404)
+    return MASTERS[kind]
+
+
+@app.get("/admin/master/{kind}", response_class=HTMLResponse)
+def admin_master(kind: str, request: Request, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    m = _master(kind)
+    rows = list(db.scalars(select(m["model"]).order_by(m["model"].code)))
+    return render(request, "admin_master.html", user, kind=kind, m=m, rows=rows)
+
+
+@app.post("/admin/master/{kind}", dependencies=[Depends(verify_csrf)])
+def admin_master_save(kind: str, request: Request, code: str = Form(...), name: str = Form(...),
+                      is_active: str = Form(""), user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    m = _master(kind)
     code = norm(code).upper()
-    if not re.fullmatch(r"[A-Z0-9_\-]{1,30}", code):
-        flash(request, "物件コードは英数字・ハイフン・アンダースコアで30文字以内", "err")
-        return go("/admin/properties")
-    p = db.get(Property, code) or Property(code=code)
-    p.name, p.is_active = norm(name), bool(is_active)
-    db.add(p)
+    if not re.fullmatch(m["pattern"], code):
+        flash(request, "コードの形式が不正です(英数字・ハイフン・アンダースコア)", "err")
+        return go(f"/admin/master/{kind}")
+    row = db.get(m["model"], code) or m["model"](code=code)
+    row.name, row.is_active = norm(name), bool(is_active)
+    db.add(row)
     db.commit()
     flash(request, f"{code} を保存しました")
-    return go("/admin/properties")
+    return go(f"/admin/master/{kind}")
 
 
-@app.post("/admin/properties/import", dependencies=[Depends(verify_csrf)])
-async def admin_property_import(request: Request, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+@app.post("/admin/master/{kind}/import", dependencies=[Depends(verify_csrf)])
+async def admin_master_import(kind: str, request: Request, user: User = Depends(admin_user),
+                              db: Session = Depends(get_db)):
     """CSV一括登録/更新。列: code,name"""
+    m = _master(kind)
     form = await request.form()
     up = form.get("file")
     if not up or not getattr(up, "filename", ""):
         flash(request, "CSVファイルを選択してください", "err")
-        return go("/admin/properties")
+        return go(f"/admin/master/{kind}")
     text = (await up.read()).decode("utf-8-sig", errors="replace")
     n = 0
     for r in csv.DictReader(io.StringIO(text)):
         code, name = norm(r.get("code", "")).upper(), norm(r.get("name", ""))
-        if re.fullmatch(r"[A-Z0-9_\-]{1,30}", code) and name:
-            p = db.get(Property, code) or Property(code=code)
-            p.name, p.is_active = name, True
-            db.add(p)
+        if re.fullmatch(m["pattern"], code) and name:
+            row = db.get(m["model"], code) or m["model"](code=code)
+            row.name, row.is_active = name, True
+            db.add(row)
             n += 1
     db.commit()
-    flash(request, f"{n}件の物件を登録/更新しました")
-    return go("/admin/properties")
+    flash(request, f"{n}件を登録/更新しました")
+    return go(f"/admin/master/{kind}")

@@ -29,8 +29,5 @@ def _secret_key() -> str:
 
 SECRET_KEY = _secret_key()
 
-# 勘定科目(経費区分)。必要に応じて経理と相談して変更してください。
-CATEGORIES = [
-    "旅費交通費", "会議費", "交際費", "消耗品費", "通信費",
-    "新聞図書費", "車両費", "外注費", "福利厚生費", "雑費",
-]
+MAX_LINES = int(os.getenv("MAX_LINES", "50"))       # 1精算書あたりの明細上限
+MAX_FILES_PER_UPLOAD = 20                              # 一括取り込みの上限

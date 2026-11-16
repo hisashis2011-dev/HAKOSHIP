@@ -17,27 +17,27 @@
 
 ## 2. アプリの配置と起動
 ```
-git clone <GitHubのリポジトリURL> hakoship && cd hakoship
+git clone <GitHubのリポジトリURL> mbs-expense && cd mbs-expense
 git checkout main                      # 本番は main(または運用ブランチ)
 cp .env.example .env && nano .env      # SECRET_KEY を設定
 docker compose up -d --build
 docker compose run --rm app python -m app.seed --admin-email あなた@社内 --admin-password '10文字以上'
 ```
-社内PC/スマホから `http://192.168.1.50:8000` を開く。管理画面で物件マスタとユーザー(CSV一括可)を登録。
+社内PC/スマホから `http://192.168.1.50:8000` を開く。管理画面で部門・工事マスタとユーザー(CSV一括可)を登録。
 
 ## 3. バックアップ(必須)
 ```
 sudo mkdir -p /mnt/backup && # NASなどを /mnt/backup にマウント(/etc/fstab)
 crontab -e
-0 2 * * * DATA_DIR=/home/あなた/hakoship/data BACKUP_DIR=/mnt/backup/hakoship KEEP_DAYS=2600 /home/あなた/hakoship/scripts/backup.sh >> /var/log/hakoship-backup.log 2>&1
+0 2 * * * DATA_DIR=/home/あなた/mbs-expense/data BACKUP_DIR=/mnt/backup/mbs-expense KEEP_DAYS=2600 /home/あなた/mbs-expense/scripts/backup.sh >> /var/log/mbs-expense-backup.log 2>&1
 ```
 - 領収書は原則7年保存のため `KEEP_DAYS=2600`(約7年)程度を推奨(容量と相談)
 - **復元テストを最初に1回、以後年1回**: tar.gzを展開し `app.db` と `receipts/` を `data/` に戻して起動確認
-- 月1回、バックアップが毎日できているか `ls /mnt/backup/hakoship` を確認
+- 月1回、バックアップが毎日できているか `ls /mnt/backup/mbs-expense` を確認
 
 ## 4. 更新(アプリを新しくするとき)
 ```
-cd hakoship && ./scripts/backup.sh  # 念のため事前バックアップ(環境変数は上記同様)
+cd mbs-expense && ./scripts/backup.sh  # 念のため事前バックアップ(環境変数は上記同様)
 git pull && docker compose up -d --build
 ```
 DBの形式変更がある更新では、更新前に必ずバックアップを取ること。
