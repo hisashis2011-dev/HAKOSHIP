@@ -332,3 +332,16 @@ def test_ocr_date_formats_are_tolerated():
     for v in ["11月15日", "", None, "2026-13-40", "abc"]:
         assert ocr_mod.parse_date(v) is None, v
     assert ocr_mod._clean({"expense_date": "2026年11月9日", "amount": 5900})["expense_date"] == "2026-11-09"
+
+
+def test_payment_date_is_chosen_by_fixed_priority_not_by_ai():
+    smartex = {"dates": [{"label": "乗車日", "date": "2026-11-15"}, {"label": "購入日", "date": "2026-11-09"},
+                         {"label": "引渡日", "date": "2026-11-15"}], "amount": 6540}
+    assert ocr_mod._clean(smartex)["expense_date"] == "2026-11-09"  # 並び順に関係なく購入日
+    slip = {"dates": [{"label": "なし", "date": "2026-11-15"}], "amount": 7920}
+    assert ocr_mod._clean(slip)["expense_date"] == "2026-11-15"
+    only_ride = {"dates": [{"label": "乗車日", "date": "2026-11-14"}]}
+    assert ocr_mod._clean(only_ride)["expense_date"] == "2026-11-14"  # 他に無ければ利用日
+    assert ocr_mod._clean({"expense_date": "2026-11-02"})["expense_date"] == "2026-11-02"  # 旧形式も可
+    both = {"dates": [{"label": "領収日", "date": "2026-11-03"}, {"label": "利用日", "date": "2026-11-01"}]}
+    assert ocr_mod._clean(both)["expense_date"] == "2026-11-03"
