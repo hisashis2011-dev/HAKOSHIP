@@ -121,6 +121,7 @@ class ExpenseLine(Base):
     receipt_mime: Mapped[str | None] = mapped_column(String(50), nullable=True)
     receipt_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     receipt_uploaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    receipt_note: Mapped[str | None] = mapped_column(String(100), nullable=True)  # 原本内の位置(例: 2/3 左上)
 
     report: Mapped[Report] = relationship(back_populates="lines")
     department: Mapped[Department | None] = relationship()

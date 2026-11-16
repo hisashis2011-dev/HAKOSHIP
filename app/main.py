@@ -18,7 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from . import workflow, receipts, ocr
 from .config import (BASE_DIR, SECRET_KEY, COOKIE_SECURE, SESSION_HOURS, MAX_AMOUNT, MAX_LINES,
                      MAX_FILES_PER_UPLOAD)
-from .db import Base, engine, get_db
+from .db import Base, engine, get_db, ensure_columns
 from .models import (User, Department, Project, Report, ExpenseLine, ApprovalLog, ROLE_LABELS,
                      STATUS_LABELS, ACTION_LABELS, EMPLOYEE, ACCOUNTING, ADMIN, DRAFT, PENDING_MANAGER,
                      PENDING_ACCOUNTING, APPROVED, PAID)
@@ -32,6 +32,7 @@ templates = Jinja2Templates(directory=BASE_DIR / "app" / "templates")
 throttle = LoginThrottle()
 
 Base.metadata.create_all(engine)
+ensure_columns()
 
 
 # ------------------------------------------------------------ helpers
@@ -116,6 +117,16 @@ def pending_for(db: Session, user: User) -> list[Report]:
     q = (select(Report).options(joinedload(Report.user), selectinload(Report.lines))
          .where(or_(*conds), Report.user_id != user.id).order_by(Report.submitted_at))
     return list(db.scalars(q))
+
+
+def release_receipt(db: Session, path: str | None, excluding: list):
+    """他の明細が同じ原本を使っていなければ、ファイルを削除する"""
+    if not path:
+        return
+    ex = [l.id for l in excluding]
+    if not db.scalar(select(func.count()).select_from(ExpenseLine).where(
+            ExpenseLine.receipt_path == path, ExpenseLine.id.not_in(ex))):
+        receipts.delete_receipt(path)
 
 
 def projects_active(db):
@@ -316,48 +327,55 @@ async def report_receipts(rid: int, request: Request, receipts_files: list[Uploa
         prepared.append((out, mime, ext, h))
 
     sem = asyncio.Semaphore(4)
-
-    ai_failed = multi = 0
+    ai_failed = 0
 
     async def read_ai(out, mime):
-        nonlocal ai_failed, multi
+        nonlocal ai_failed
         if not ocr.enabled():
-            return {}
+            return None
         async with sem:
             try:
-                return await run_in_threadpool(ocr.extract, out, mime)
-            except ocr.OcrError as ex:
-                if str(ex) == "multiple":
-                    multi += 1
-                else:
-                    ai_failed += 1
-                return {}
+                return await run_in_threadpool(ocr.extract_many, out, mime)
+            except ocr.OcrError:
+                ai_failed += 1
+                return None
 
     results = await asyncio.gather(*[read_ai(o, m) for o, m, _, _ in prepared])
-    filled = 0
-    for (out, mime, ext, h), fields in zip(prepared, results):
-        d = fields.get("expense_date")
-        line = ExpenseLine(
-            report_id=r.id, department_code=r.department_code,
-            expense_date=date.fromisoformat(d) if d else None, amount=fields.get("amount"),
-            payee=fields.get("payee"), invoice_no=fields.get("invoice_no"), purpose="",
-            receipt_path=receipts.store(out, ext), receipt_mime=mime, receipt_sha256=h,
-            receipt_uploaded_at=datetime.now())
-        db.add(line)
-        filled += bool(fields)
+    n_files, n_lines, n_ai, n_multi = len(prepared), 0, 0, 0
+    now_ = datetime.now()
+    for (out, mime, ext, h), found in zip(prepared, results):
+        rel = receipts.store(out, ext)  # 原本は1つ。複数の領収書が写っていれば全ての行が共有する
+        found = found or [{}]
+        room_left = MAX_LINES - len(r.lines) - n_lines
+        if len(found) > room_left:
+            msgs.append(f"明細は{MAX_LINES}行までです。超過分の領収書は取り込みませんでした")
+            found = found[:max(room_left, 1)]
+        multi = len(found) > 1
+        n_multi += multi
+        for i, f in enumerate(found, 1):
+            d = f.get("expense_date")
+            note = f"{i}/{len(found)}件目" + (f"({f['location']})" if f.get("location") else "") if multi else None
+            db.add(ExpenseLine(
+                report_id=r.id, department_code=r.department_code,
+                expense_date=date.fromisoformat(d) if d else None, amount=f.get("amount"),
+                payee=f.get("payee"), invoice_no=f.get("invoice_no"), purpose="",
+                receipt_path=rel, receipt_mime=mime, receipt_sha256=h, receipt_uploaded_at=now_,
+                receipt_note=note))
+            n_lines += 1
+            n_ai += bool(f.get("amount") or f.get("payee") or f.get("expense_date"))
     db.commit()
     if prepared:
-        if filled:
-            tail = f"(うち{filled}枚はAIが自動入力。必ず内容を確認してください)"
+        head = f"{n_files}ファイルから{n_lines}件の明細を作りました" if n_lines != n_files else f"{n_files}枚を取り込みました"
+        if n_ai:
+            tail = f"(うち{n_ai}件はAIが自動入力" + (f"。{n_multi}ファイルは複数の領収書を検出、各行の「領収書を見る」で原本と照合" if n_multi else "") \
+                   + "。必ず内容を確認してください)"
         elif not ocr.enabled():
             tail = "。AI自動読み取りは無効です(APIキー未設定)。各行を手入力してください"
-        elif multi:
-            tail = f"。{multi}枚の画像に複数の領収書が写っているため自動入力できませんでした。1枚ずつ撮影し直すか、手入力してください"
         elif ai_failed:
             tail = "。AIの読み取りに失敗しました(サーバー画面のログに理由が出ています)。手入力してください"
         else:
             tail = "。AIは項目を読み取れませんでした。手入力してください"
-        flash(request, f"{len(prepared)}枚を取り込みました{tail}", "ok" if filled or not ocr.enabled() else "warn")
+        flash(request, head + tail, "ok" if n_ai or not ocr.enabled() else "warn")
     for m in msgs:
         flash(request, m, "warn")
     return go(f"/reports/{rid}/edit")
@@ -406,7 +424,7 @@ async def report_save(rid: int, request: Request, user: User = Depends(current_u
     if action.startswith("delete:"):
         victim = next((l for l in r.lines if str(l.id) == action[7:]), None)
         if victim:
-            receipts.delete_receipt(victim.receipt_path)
+            release_receipt(db, victim.receipt_path, [victim])
             r.lines.remove(victim)
             flash(request, "明細を削除しました")
         db.commit()
@@ -454,8 +472,8 @@ def report_delete(rid: int, request: Request, user: User = Depends(current_user)
     r = get_report(db, rid, user)
     if not workflow.can_edit(user, r) or r.history:
         raise HTTPException(403, "削除できません(一度申請された精算書は削除できません)")
-    for l in r.lines:
-        receipts.delete_receipt(l.receipt_path)
+    for path in {l.receipt_path for l in r.lines}:
+        release_receipt(db, path, r.lines)
     db.delete(r)
     db.commit()
     flash(request, "下書きを削除しました")
@@ -570,7 +588,7 @@ def export_csv(month: str = "", status: str = "", q: str = "", proj: str = "",
     w = csv.writer(buf)
     w.writerow(["精算書ID", "申請日", "申請者", "社員メール", "所属部門", "行", "部門コード", "部門名", "支払日",
                 "工事コード", "工事名", "支払先", "支払金額", "支払内容・支払目的", "インボイス番号", "領収書",
-                "精算書合計①", "仮払金②", "差引過不足③", "最終承認日時", "精算日時", "状況"])
+                "原本内の位置", "精算書合計①", "仮払金②", "差引過不足③", "最終承認日時", "精算日時", "状況"])
     d = lambda x: x.strftime("%Y-%m-%d %H:%M") if x else ""
     for r in db.scalars(stmt):
         for n, l in enumerate(r.lines, 1):
@@ -579,7 +597,7 @@ def export_csv(month: str = "", status: str = "", q: str = "", proj: str = "",
                         l.expense_date.isoformat() if l.expense_date else "", l.project_code or "",
                         _csv_safe(projs.get(l.project_code, "")), _csv_safe(l.payee), l.amount or 0,
                         _csv_safe(l.purpose), l.invoice_no or "", "なし" if l.no_receipt else "あり",
-                        r.total, r.advance_amount, r.balance, d(r.approved_at), d(r.paid_at), STATUS_LABELS[r.status]])
+                        _csv_safe(l.receipt_note), r.total, r.advance_amount, r.balance, d(r.approved_at), d(r.paid_at), STATUS_LABELS[r.status]])
     return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="mbs_expenses_{start:%Y%m}.csv"'})
 

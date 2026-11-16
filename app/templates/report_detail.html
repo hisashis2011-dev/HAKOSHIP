@@ -18,7 +18,7 @@
     <td>{{ l.payee }}{% if l.invoice_no %}<br><span class="small muted">{{ l.invoice_no }}</span>{% endif %}</td>
     <td class="r">{{ '{:,}'.format(l.amount or 0) }}</td>
     <td class="wrap">{{ l.purpose }}</td>
-    <td>{% if l.receipt_path %}<a href="/lines/{{ l.id }}/receipt" target="_blank">
+    <td>{% if l.receipt_note %}<span class="small muted">{{ l.receipt_note }}</span><br>{% endif %}{% if l.receipt_path %}<a href="/lines/{{ l.id }}/receipt" target="_blank">
         {% if l.receipt_mime == 'application/pdf' %}PDF{% else %}<img class="thumb" src="/lines/{{ l.id }}/receipt" alt="領収書">{% endif %}</a>{% else %}<span class="muted small">なし</span>{% endif %}</td></tr>
   {% endfor %}
 </table></div>

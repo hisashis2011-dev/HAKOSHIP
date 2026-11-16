@@ -41,7 +41,7 @@
       <label class="wide">支払内容・支払目的<textarea name="purpose_{{ l.id }}" rows="2" maxlength="500">{{ w.purpose }}</textarea></label>
     </div>
     <div class="row between">
-      <span class="small">{% if l.receipt_path %}<a href="/lines/{{ l.id }}/receipt" target="_blank">🧾 領収書を見る</a>{% else %}<span class="muted">領収書なし(交通費など)</span>{% endif %}</span>
+      <span class="small">{% if l.receipt_path %}<a href="/lines/{{ l.id }}/receipt" target="_blank">🧾 領収書(原本)を見る</a>{% if l.receipt_note %} <span class="muted">— 原本の {{ l.receipt_note }}</span>{% endif %}{% else %}<span class="muted">領収書なし(交通費など)</span>{% endif %}</span>
       <button class="btn danger small" name="action" value="delete:{{ l.id }}" formnovalidate onclick="return confirm('この行を削除しますか？')">この行を削除</button>
     </div>
   </fieldset>

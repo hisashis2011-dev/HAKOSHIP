@@ -225,34 +225,60 @@ def _api_reply(text):
     return httpx.Response(200, json={"content": [{"type": "text", "text": text}]})
 
 
-def test_ocr_extract_parses_and_sanitizes(monkeypatch):
+def test_ocr_extract_many_parses_and_sanitizes(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     ocr_mod.breaker.__init__()
-    reply = '```json\n{"expense_date":"2026-11-03","amount":1200,"payee":"カフェ","invoice_no":"T1234567890123"}\n```'
-    assert ocr_mod.extract(jpeg(), "image/jpeg", _mock_client(lambda req: _api_reply(reply))) == {
-        "expense_date": "2026-11-03", "amount": 1200, "payee": "カフェ", "invoice_no": "T1234567890123"}
-    r = ocr_mod.extract(jpeg(), "image/jpeg", _mock_client(lambda req: _api_reply(
-        '{"expense_date":"2999-01-01","amount":980,"payee":null,"invoice_no":"bad"}')))
-    assert r == {"amount": 980}
+    reply = ('```json\n{"receipts":[{"expense_date":"2026-11-03","amount":1200,"payee":"カフェ","invoice_no":"T1234567890123","location":"左上"},'
+             '{"expense_date":"2999-01-01","amount":980,"payee":null,"invoice_no":"bad","location":"右下"},"junk"]}\n```')
+    r = ocr_mod.extract_many(jpeg(), "image/jpeg", _mock_client(lambda req: _api_reply(reply)))
+    assert r == [{"expense_date": "2026-11-03", "amount": 1200, "payee": "カフェ", "invoice_no": "T1234567890123", "location": "左上"},
+                 {"amount": 980, "location": "右下"}]
+    assert ocr_mod.extract_many(jpeg(), "image/jpeg", _mock_client(lambda req: _api_reply('{"receipts":[]}'))) == []
 
 
-def test_upload_prefills_lines_from_ai_and_survives_ai_failure(monkeypatch):
+def test_one_scan_with_many_receipts_makes_many_lines_sharing_one_original(monkeypatch):
     emp = login("emp@x.jp")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     ocr_mod.breaker.__init__()
-    monkeypatch.setattr(ocr_mod, "extract", lambda data, mime, client=None: {
-        "expense_date": "2026-11-02", "amount": 777, "payee": "AI店"})
+    monkeypatch.setattr(ocr_mod, "extract_many", lambda d, m, client=None: [
+        {"expense_date": "2026-11-15", "amount": 7920, "payee": "JR西日本", "location": "左下"},
+        {"expense_date": "2026-11-15", "amount": 6540, "payee": "JR西日本", "location": "右上"},
+        {"expense_date": "2026-11-15", "amount": 5900, "payee": "JR西日本", "location": "右下"}])
     rid = new_report(emp)
-    upload(emp, rid, [(5, 5, 5), (6, 6, 6)])
+    page = upload(emp, rid, [(4, 4, 4)])
     with SessionLocal() as db:
         ls = db.get(Report, rid).lines
-        assert [(l.amount, l.payee, str(l.expense_date)) for l in ls] == [(777, "AI店", "2026-11-02")] * 2
+        assert [l.amount for l in ls] == [7920, 6540, 5900]
+        assert len({l.receipt_path for l in ls}) == 1 and ls[1].receipt_note == "2/3件目(右上)"
+        path = ls[0].receipt_path
+    from app.config import UPLOAD_DIR
+    assert "原本の 2/3件目(右上)" in emp.get(f"/reports/{rid}/edit").text
+    # 同じ原本は再取り込みできない
+    upload(emp, rid, [(4, 4, 4)])
+    assert len(line_ids(rid)) == 3
+    # 1行削除しても他の行が使う原本は残り、全て消すと原本も消える
+    ids = line_ids(rid)
+    save(emp, rid, {i: row() for i in ids}, f"delete:{ids[0]}")
+    assert (UPLOAD_DIR / path).exists()
+    save(emp, rid, {i: row() for i in ids[1:]}, f"delete:{ids[1]}")
+    save(emp, rid, {ids[2]: row()}, f"delete:{ids[2]}")
+    assert not (UPLOAD_DIR / path).exists()
+
+
+def test_upload_survives_ai_failure_and_empty_result(monkeypatch):
+    emp = login("emp@x.jp")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    ocr_mod.breaker.__init__()
 
     def boom(*a, **k):
-        raise ocr_mod.OcrError("down")
-    monkeypatch.setattr(ocr_mod, "extract", boom)
-    upload(emp, rid, [(8, 8, 8)])  # AI障害でも取り込みは成功し手入力へ
-    assert len(line_ids(rid)) == 3
+        raise ocr_mod.OcrError("failed")
+    monkeypatch.setattr(ocr_mod, "extract_many", boom)
+    rid = new_report(emp)
+    upload(emp, rid, [(8, 8, 8)])
+    assert len(line_ids(rid)) == 1
+    monkeypatch.setattr(ocr_mod, "extract_many", lambda d, m, client=None: [])
+    upload(emp, rid, [(9, 9, 9)])
+    assert len(line_ids(rid)) == 2  # 読み取れなくても手入力用の行はできる
 
 
 def test_ocr_breaker_suspends_after_failures(monkeypatch):
@@ -266,21 +292,16 @@ def test_ocr_breaker_suspends_after_failures(monkeypatch):
     monkeypatch.setattr(ocr_mod.httpx, "post", boom)
     for _ in range(5):
         with pytest.raises(ocr_mod.OcrError):
-            ocr_mod.extract(jpeg(), "image/jpeg")
+            ocr_mod.extract_many(jpeg(), "image/jpeg")
     assert len(calls) == 3
     ocr_mod.breaker.__init__()
 
 
-def test_ocr_multiple_receipts_in_one_image_is_not_guessed(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    ocr_mod.breaker.__init__()
-    reply = '{"receipt_count":3,"expense_date":"2026-11-15","amount":7920,"payee":"JR","invoice_no":null}'
-    with pytest.raises(ocr_mod.OcrError, match="multiple"):
-        ocr_mod.extract(jpeg(), "image/jpeg", _mock_client(lambda req: _api_reply(reply)))
-    assert ocr_mod.breaker.fails == 0  # 失敗扱いにしない(障害ではない)
-    # 画面にも案内が出る
-    emp = login("emp@x.jp")
-    monkeypatch.setattr(ocr_mod, "extract", lambda d, m, client=None: (_ for _ in ()).throw(ocr_mod.OcrError("multiple")))
-    rid = new_report(emp)
-    upload(emp, rid, [(3, 3, 3)])
-    assert "複数の領収書" in emp.get(f"/reports/{rid}/edit").text
+def test_schema_migration_adds_missing_column():
+    from sqlalchemy import text
+    from app.db import engine, ensure_columns
+    with engine.begin() as c:
+        c.execute(text("ALTER TABLE expense_lines DROP COLUMN receipt_note"))
+    ensure_columns()
+    with engine.begin() as c:
+        c.execute(text("SELECT receipt_note FROM expense_lines")).fetchall()
