@@ -323,3 +323,12 @@ def test_invalid_api_key_is_detected_with_clear_message(monkeypatch):
     assert ocr_mod.key_status() == "ok"
     monkeypatch.delenv("ANTHROPIC_API_KEY")
     assert ocr_mod.key_status() == "missing"
+
+
+def test_ocr_date_formats_are_tolerated():
+    from datetime import date
+    for v in ["2026-11-09", "2026/11/9", "2026年11月9日", " 2026.11.09 "]:
+        assert ocr_mod.parse_date(v) == date(2026, 11, 9), v
+    for v in ["11月15日", "", None, "2026-13-40", "abc"]:
+        assert ocr_mod.parse_date(v) is None, v
+    assert ocr_mod._clean({"expense_date": "2026年11月9日", "amount": 5900})["expense_date"] == "2026-11-09"
