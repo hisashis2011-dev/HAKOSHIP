@@ -80,6 +80,15 @@ def _clean(raw: dict) -> dict:
     return out
 
 
+def _parse_json(text: str) -> dict:
+    """AIの返答から最初のJSONオブジェクトを取り出す(前後に説明文やコードブロックがあっても可)"""
+    i = text.find("{")
+    if i < 0:
+        return {}
+    obj, _ = json.JSONDecoder().raw_decode(text[i:])
+    return obj if isinstance(obj, dict) else {}
+
+
 def extract_many(data: bytes, mime: str, client: httpx.Client | None = None) -> list[dict]:
     """1つの画像/PDFから領収書を全て読み取る。各要素は _clean 済みの項目 + "location"(原本内の位置)"""
     if not enabled():
@@ -100,8 +109,7 @@ def extract_many(data: bytes, mime: str, client: httpx.Client | None = None) -> 
         r = (client or httpx).post(API_URL, json=body, headers=headers, timeout=TIMEOUT)
         r.raise_for_status()
         text = "".join(b.get("text", "") for b in r.json()["content"] if b.get("type") == "text")
-        m = re.search(r"\{.*\}", text, re.S)
-        raw = json.loads(m.group(0)) if m else {}
+        raw = _parse_json(text)
         items = raw.get("receipts") if isinstance(raw, dict) else None
         out = []
         for it in (items if isinstance(items, list) else [])[:MAX_RECEIPTS]:
@@ -123,7 +131,8 @@ def extract_many(data: bytes, mime: str, client: httpx.Client | None = None) -> 
         raise OcrError("failed")
     except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as ex:
         breaker.fail()
-        log.warning("OCR失敗(通信/解析エラー): %s %s", type(ex).__name__, ex)
+        log.warning("OCR失敗(通信/解析エラー): %s %s / AI応答の冒頭: %.200r", type(ex).__name__, ex,
+                    locals().get("text", ""))
         raise OcrError("failed")
     breaker.ok()
     return out

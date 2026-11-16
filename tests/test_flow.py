@@ -234,6 +234,9 @@ def test_ocr_extract_many_parses_and_sanitizes(monkeypatch):
     assert r == [{"expense_date": "2026-11-03", "amount": 1200, "payee": "カフェ", "invoice_no": "T1234567890123", "location": "左上"},
                  {"amount": 980, "location": "右下"}]
     assert ocr_mod.extract_many(jpeg(), "image/jpeg", _mock_client(lambda req: _api_reply('{"receipts":[]}'))) == []
+    # 前後に説明文があっても読める
+    chatty = '読み取りました。\n{"receipts":[{"amount":500,"payee":"A"}]}\n以上です {参考}'
+    assert ocr_mod.extract_many(jpeg(), "image/jpeg", _mock_client(lambda req: _api_reply(chatty)))[0]["amount"] == 500
 
 
 def test_one_scan_with_many_receipts_makes_many_lines_sharing_one_original(monkeypatch):
