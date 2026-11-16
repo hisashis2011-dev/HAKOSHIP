@@ -317,17 +317,20 @@ async def report_receipts(rid: int, request: Request, receipts_files: list[Uploa
 
     sem = asyncio.Semaphore(4)
 
-    ai_failed = 0
+    ai_failed = multi = 0
 
     async def read_ai(out, mime):
-        nonlocal ai_failed
+        nonlocal ai_failed, multi
         if not ocr.enabled():
             return {}
         async with sem:
             try:
                 return await run_in_threadpool(ocr.extract, out, mime)
-            except ocr.OcrError:
-                ai_failed += 1
+            except ocr.OcrError as ex:
+                if str(ex) == "multiple":
+                    multi += 1
+                else:
+                    ai_failed += 1
                 return {}
 
     results = await asyncio.gather(*[read_ai(o, m) for o, m, _, _ in prepared])
@@ -348,6 +351,8 @@ async def report_receipts(rid: int, request: Request, receipts_files: list[Uploa
             tail = f"(うち{filled}枚はAIが自動入力。必ず内容を確認してください)"
         elif not ocr.enabled():
             tail = "。AI自動読み取りは無効です(APIキー未設定)。各行を手入力してください"
+        elif multi:
+            tail = f"。{multi}枚の画像に複数の領収書が写っているため自動入力できませんでした。1枚ずつ撮影し直すか、手入力してください"
         elif ai_failed:
             tail = "。AIの読み取りに失敗しました(サーバー画面のログに理由が出ています)。手入力してください"
         else:

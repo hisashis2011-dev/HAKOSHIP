@@ -269,3 +269,18 @@ def test_ocr_breaker_suspends_after_failures(monkeypatch):
             ocr_mod.extract(jpeg(), "image/jpeg")
     assert len(calls) == 3
     ocr_mod.breaker.__init__()
+
+
+def test_ocr_multiple_receipts_in_one_image_is_not_guessed(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    ocr_mod.breaker.__init__()
+    reply = '{"receipt_count":3,"expense_date":"2026-11-15","amount":7920,"payee":"JR","invoice_no":null}'
+    with pytest.raises(ocr_mod.OcrError, match="multiple"):
+        ocr_mod.extract(jpeg(), "image/jpeg", _mock_client(lambda req: _api_reply(reply)))
+    assert ocr_mod.breaker.fails == 0  # 失敗扱いにしない(障害ではない)
+    # 画面にも案内が出る
+    emp = login("emp@x.jp")
+    monkeypatch.setattr(ocr_mod, "extract", lambda d, m, client=None: (_ for _ in ()).throw(ocr_mod.OcrError("multiple")))
+    rid = new_report(emp)
+    upload(emp, rid, [(3, 3, 3)])
+    assert "複数の領収書" in emp.get(f"/reports/{rid}/edit").text
