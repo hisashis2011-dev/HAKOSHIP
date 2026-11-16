@@ -369,13 +369,15 @@ async def report_receipts(rid: int, request: Request, receipts_files: list[Uploa
         if n_ai:
             tail = f"(うち{n_ai}件はAIが自動入力" + (f"。{n_multi}ファイルは複数の領収書を検出、各行の「領収書を見る」で原本と照合" if n_multi else "") \
                    + "。必ず内容を確認してください)"
+        elif ocr.key_status() == "invalid":
+            tail = "。APIキーの形式が不正です(説明文のまま設定していませんか？ 半角英数字の本物のキーを設定してください)。手入力してください"
         elif not ocr.enabled():
             tail = "。AI自動読み取りは無効です(APIキー未設定)。各行を手入力してください"
         elif ai_failed:
             tail = "。AIの読み取りに失敗しました(サーバー画面のログに理由が出ています)。手入力してください"
         else:
             tail = "。AIは項目を読み取れませんでした。手入力してください"
-        flash(request, head + tail, "ok" if n_ai or not ocr.enabled() else "warn")
+        flash(request, head + tail, "ok" if n_ai or ocr.key_status() == "missing" else "warn")
     for m in msgs:
         flash(request, m, "warn")
     return go(f"/reports/{rid}/edit")

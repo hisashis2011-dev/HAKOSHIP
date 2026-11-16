@@ -19,8 +19,18 @@ MODEL = os.getenv("OCR_MODEL", "claude-haiku-5-5")
 TIMEOUT = float(os.getenv("OCR_TIMEOUT", "25"))
 
 
+def key_status() -> str:
+    """missing: 未設定 / invalid: 形式不正(日本語や空白を含む=説明文のまま設定した等) / ok"""
+    key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if not key:
+        return "missing"
+    if not key.isascii() or any(c.isspace() for c in key) or key.startswith(("ここ", "<", "あなた")):
+        return "invalid"
+    return "ok"
+
+
 def enabled() -> bool:
-    return bool(os.getenv("ANTHROPIC_API_KEY"))
+    return key_status() == "ok"
 
 
 class OcrError(Exception):
@@ -103,7 +113,7 @@ def extract_many(data: bytes, mime: str, client: httpx.Client | None = None) -> 
                                             "data": base64.b64encode(data).decode()}},
             {"type": "text", "text": PROMPT}]}],
     }
-    headers = {"x-api-key": os.environ["ANTHROPIC_API_KEY"], "anthropic-version": "2023-06-01",
+    headers = {"x-api-key": os.environ["ANTHROPIC_API_KEY"].strip(), "anthropic-version": "2023-06-01",
                "content-type": "application/json"}
     try:
         r = (client or httpx).post(API_URL, json=body, headers=headers, timeout=TIMEOUT)

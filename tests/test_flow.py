@@ -308,3 +308,18 @@ def test_schema_migration_adds_missing_column():
     ensure_columns()
     with engine.begin() as c:
         c.execute(text("SELECT receipt_note FROM expense_lines")).fetchall()
+
+
+def test_invalid_api_key_is_detected_with_clear_message(monkeypatch):
+    emp = login("emp@x.jp")
+    for bad in ["ここにキー", "sk-ant- with space", "<your key>"]:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", bad)
+        assert ocr_mod.key_status() == "invalid" and not ocr_mod.enabled()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ここにキー")
+    rid = new_report(emp)
+    upload(emp, rid, [(21, 22, 23)])
+    assert "APIキーの形式が不正" in emp.get(f"/reports/{rid}/edit").text
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-abc")
+    assert ocr_mod.key_status() == "ok"
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    assert ocr_mod.key_status() == "missing"
